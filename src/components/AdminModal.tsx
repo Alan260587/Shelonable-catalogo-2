@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Product, Category, AdminStatus } from '../types';
 import { supabase } from '../lib/supabaseClient';
+import { uploadCatalogPdfToSupabase } from '../lib/supabaseCatalog';
 import {
   X,
   Lock,
@@ -72,6 +73,12 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [sbPassword, setSbPassword] = useState('');
   const [sbAuthError, setSbAuthError] = useState('');
   const [sbAuthLoading, setSbAuthLoading] = useState(false);
+  const [uploadingCatalogPdf, setUploadingCatalogPdf] = useState(false);
+  const [catalogPdfUploadResult, setCatalogPdfUploadResult] = useState<{
+    storagePath: string;
+    publicUrl: string;
+  } | null>(null);
+  const [catalogPdfUploadError, setCatalogPdfUploadError] = useState('');
 
   const [activeTab, setActiveTab] = useState<'edit-product' | 'new-product' | 'edit-category'>('edit-product');
 
@@ -215,6 +222,8 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   const handleSupabaseLogoutClick = async () => {
     setSbAuthError('');
+    setCatalogPdfUploadError('');
+    setCatalogPdfUploadResult(null);
     if (!supabase) return;
     setSbAuthLoading(true);
     try {
@@ -228,6 +237,39 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       setSbAuthError('Error al cerrar la sesión de Supabase.');
     } finally {
       setSbAuthLoading(false);
+    }
+  };
+
+  const handleUploadCatalogPdfToSupabase = async () => {
+    setCatalogPdfUploadError('');
+    setCatalogPdfUploadResult(null);
+    if (!supabase || !hasSupabaseSession) {
+      setCatalogPdfUploadError('Debes iniciar sesión en Supabase para subir el PDF del catálogo.');
+      return;
+    }
+    setUploadingCatalogPdf(true);
+    try {
+      const res = await fetch('/api/catalog/pdf', {
+        method: 'GET',
+        credentials: 'include',
+      });
+      if (!res.ok) {
+        throw new Error(`No se pudo obtener el PDF desde /api/catalog/pdf (HTTP ${res.status}).`);
+      }
+      const pdfBlob = await res.blob();
+      if (!pdfBlob || pdfBlob.size === 0) {
+        throw new Error('El archivo PDF obtenido desde /api/catalog/pdf está vacío.');
+      }
+      const result = await uploadCatalogPdfToSupabase(pdfBlob);
+      setCatalogPdfUploadResult(result);
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Error al subir el PDF del catálogo a Supabase Storage.';
+      setCatalogPdfUploadError(msg);
+    } finally {
+      setUploadingCatalogPdf(false);
     }
   };
 
@@ -546,18 +588,69 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               </div>
 
               {hasSupabaseSession ? (
-                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pt-1">
-                  <p className="text-xs text-slate-600">
-                    Los productos creados, editados o eliminados y las imágenes subidas se guardan automáticamente en Supabase (<code className="font-mono-num">public.products</code> y bucket <code className="font-mono-num">product-images</code>).
-                  </p>
-                  <button
-                    type="button"
-                    onClick={handleSupabaseLogoutClick}
-                    disabled={sbAuthLoading}
-                    className="px-3.5 py-2 rounded-xl bg-slate-200 hover:bg-slate-300 text-slate-800 text-xs font-semibold whitespace-nowrap transition-colors shrink-0"
-                  >
-                    {sbAuthLoading ? 'Cerrando...' : 'Cerrar sesión de Supabase'}
-                  </button>
+                <div className="space-y-3 pt-1">
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                    <p className="text-xs text-slate-600">
+                      Los productos creados, editados o eliminados y las imágenes subidas se guardan automáticamente en Supabase (<code className="font-mono-num">public.products</code> y bucket <code className="font-mono-num">product-images</code>).
+                    </p>
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={handleUploadCatalogPdfToSupabase}
+                        disabled={uploadingCatalogPdf || sbAuthLoading}
+                        className="px-3.5 py-2 rounded-xl bg-sky-700 hover:bg-sky-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>
+                          {uploadingCatalogPdf
+                            ? 'Subiendo…'
+                            : 'Subir PDF del catálogo a Supabase Storage'}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSupabaseLogoutClick}
+                        disabled={sbAuthLoading || uploadingCatalogPdf}
+                        className="px-3.5 py-2 rounded-xl bg-slate-200 hover:bg-slate-300 disabled:opacity-50 text-slate-800 text-xs font-semibold whitespace-nowrap transition-colors"
+                      >
+                        {sbAuthLoading ? 'Cerrando...' : 'Cerrar sesión de Supabase'}
+                      </button>
+                    </div>
+                  </div>
+
+                  {catalogPdfUploadResult && (
+                    <div className="p-3 rounded-xl bg-emerald-50 border border-emerald-200 text-xs text-emerald-900 space-y-1">
+                      <div className="font-semibold flex items-center gap-1.5">
+                        <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                        <span>
+                          PDF del catálogo subido correctamente al bucket{' '}
+                          <code className="font-mono-num">product-images</code>
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-emerald-800">
+                        <strong>Ruta en Storage:</strong>{' '}
+                        <code className="font-mono-num">{catalogPdfUploadResult.storagePath}</code>
+                      </p>
+                      <p className="text-[11px] text-emerald-800 break-all">
+                        <strong>URL pública:</strong>{' '}
+                        <a
+                          href={catalogPdfUploadResult.publicUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="underline hover:text-emerald-950 font-mono-num"
+                        >
+                          {catalogPdfUploadResult.publicUrl}
+                        </a>
+                      </p>
+                    </div>
+                  )}
+
+                  {catalogPdfUploadError && (
+                    <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-700 font-medium flex items-center gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 text-rose-600" />
+                      <span>Error al subir PDF a Supabase Storage: {catalogPdfUploadError}</span>
+                    </div>
+                  )}
                 </div>
               ) : (
                 <form onSubmit={handleSupabaseLoginSubmit} className="space-y-3 pt-1">

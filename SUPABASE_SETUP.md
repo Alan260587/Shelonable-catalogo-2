@@ -108,4 +108,23 @@ Para que los productos e imágenes agregados, editados o eliminados desde el Pan
    - Para cerrar únicamente la sesión de la base de datos, haz clic en el botón **«Cerrar sesión de Supabase»** dentro de esa misma sección; **esto no cierra el Panel Admin ni cambia su llave actual**.
    - Mientras la sesión de Supabase esté cerrada (`Sesión de Supabase no iniciada`), crear, editar, eliminar y subir imágenes seguirá funcionando mediante el **respaldo del servidor Express/SSE actual** con su aviso no bloqueante, sin perder tus cambios locales.
 
+---
+
+## Paso 8: Alojar el PDF Completo del Catálogo en Supabase Storage (Sin subirlo a GitHub)
+
+El archivo PDF local del catálogo está excluido en `.gitignore` para mantener el repositorio de GitHub ligero (~4 MB). Para que la descarga del PDF funcione también en despliegues externos o copias desde GitHub:
+
+1. **Subir el PDF desde el Panel Administrativo (una sola vez):**
+   - Entra al **Panel Administrativo** con tu llave actual y luego inicia sesión en la sección **«Sesión de Supabase (para guardar en la base de datos)»**.
+   - Al tener la sesión activa, aparecerá el botón **«Subir PDF del catálogo a Supabase Storage»**.
+   - Al pulsarlo, la aplicación obtiene el archivo PDF desde `/api/catalog/pdf` como `Blob`, verifica que no esté vacío y lo sube con tu sesión autenticada al bucket público **`product-images`** en la ruta fija **`catalog/Catalogo_Shelo_NABEL2026.pdf`** (`upsert: true`, `contentType: 'application/pdf'`).
+   - Al finalizar, el panel muestra la ruta guardada y la URL pública del PDF en Supabase Storage.
+
+2. **Cómo funciona la descarga en `/api/catalog/pdf`:**
+   - Cuando un visitante pulsa descargar el catálogo PDF (`/api/catalog/pdf`), el servidor realiza primero una comprobación `HEAD` (sin autenticación y con tiempo de espera corto) a la URL pública `.../storage/v1/object/public/product-images/catalog/Catalogo_Shelo_NABEL2026.pdf`.
+   - **Si el archivo ya existe en Supabase Storage (`HTTP 200`):** el servidor responde con una redirección **`302 Found`** hacia esa URL pública de Supabase Storage.
+   - **Si aún no se ha subido o la comprobación falla/expira:** el servidor entrega como respaldo el archivo PDF local (si existe en el entorno actual) o responde `404` con un mensaje claro si tampoco existe localmente.
+   - El visor interactivo de páginas sigue utilizando sin cambios las imágenes prerenderizadas `page_001.jpg`–`page_030.jpg`.
+
+
 

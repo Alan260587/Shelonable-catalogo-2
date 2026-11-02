@@ -8,6 +8,8 @@ import { fileURLToPath } from 'url';
 import { createServer as createViteServer } from 'vite';
 import { INITIAL_CATALOG_DATA } from './src/data/initialCatalog.ts';
 import { CatalogData, Product } from './src/types.ts';
+import { supabaseProjectUrl } from './src/lib/supabaseClient.ts';
+import { CATALOG_PDF_STORAGE_PATH } from './src/lib/supabaseCatalog.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -163,10 +165,43 @@ async function startServer() {
     });
   });
 
-  // 1b. Authenticated binary stream for downloading the full PDF inside iframe (avoids mobile cookie interstitial)
-  app.get('/api/catalog/pdf', (_req, res) => {
+  // 1b. Download full catalog PDF: redirect (302) to public Supabase Storage if uploaded, otherwise stream local fallback
+  app.get('/api/catalog/pdf', async (_req, res) => {
+    const baseSupabaseUrl = (
+      process.env.VITE_SUPABASE_URL ||
+      process.env.SUPABASE_URL ||
+      supabaseProjectUrl ||
+      ''
+    )
+      .trim()
+      .replace(/\/+$/, '');
+
+    if (baseSupabaseUrl.startsWith('https://') || baseSupabaseUrl.startsWith('http://')) {
+      const publicStoragePdfUrl = `${baseSupabaseUrl}/storage/v1/object/public/product-images/${CATALOG_PDF_STORAGE_PATH}`;
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 2500);
+      try {
+        const headRes = await fetch(publicStoragePdfUrl, {
+          method: 'HEAD',
+          redirect: 'manual',
+          signal: controller.signal,
+        });
+        if (headRes.status === 200) {
+          res.redirect(302, publicStoragePdfUrl);
+          return;
+        }
+      } catch {
+        // Ignore network/timeout errors and fall back to local PDF file
+      } finally {
+        clearTimeout(timeoutId);
+      }
+    }
+
     if (!fs.existsSync(PDF_FILE_PATH)) {
-      res.status(404).json({ error: 'Archivo PDF del catálogo no encontrado.' });
+      res.status(404).json({
+        error:
+          'Archivo PDF del catálogo no encontrado en Supabase Storage ni en el servidor local. Súbelo desde el Panel Admin con tu sesión de Supabase activa.',
+      });
       return;
     }
     const stat = fs.statSync(PDF_FILE_PATH);

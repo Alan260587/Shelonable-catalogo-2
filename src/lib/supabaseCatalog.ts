@@ -19,6 +19,7 @@ export interface SupabaseProductRow {
 }
 
 const STORAGE_BUCKET = 'product-images';
+export const CATALOG_PDF_STORAGE_PATH = 'catalog/Catalogo_Shelo_NABEL2026.pdf';
 
 /**
  * Convierte una fila de `public.products` en Supabase al tipo `Product` de la aplicación.
@@ -259,5 +260,52 @@ export async function deleteProductFromSupabase(product: Product): Promise<void>
     throw err;
   }
 }
+
+/**
+ * Sube el archivo PDF completo del catálogo al bucket público `product-images`
+ * en la ruta fija `catalog/Catalogo_Shelo_NABEL2026.pdf`.
+ * Exige una sesión autenticada activa en Supabase Auth (`supabase.auth.getSession()`).
+ */
+export async function uploadCatalogPdfToSupabase(
+  pdfBlob: Blob
+): Promise<{ publicUrl: string; storagePath: string }> {
+  if (!isSupabaseConfigured || !supabase) {
+    throw new Error('Supabase no está configurado.');
+  }
+
+  const { data: sessionData, error: sessionError } = await supabase.auth.getSession();
+  if (sessionError || !sessionData?.session) {
+    throw new Error(
+      'SUPABASE_AUTH_REQUIRED: Sin sesión autenticada en Supabase Auth (subida reservada a rol authenticated).'
+    );
+  }
+
+  if (!pdfBlob || pdfBlob.size === 0) {
+    throw new Error('El archivo PDF obtenido está vacío.');
+  }
+
+  const { error: uploadError } = await supabase.storage
+    .from(STORAGE_BUCKET)
+    .upload(CATALOG_PDF_STORAGE_PATH, pdfBlob, {
+      cacheControl: '3600',
+      upsert: true,
+      contentType: 'application/pdf',
+    });
+
+  if (uploadError) {
+    throw new Error(uploadError.message);
+  }
+
+  const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(CATALOG_PDF_STORAGE_PATH);
+  if (!data?.publicUrl) {
+    throw new Error('No se pudo obtener la URL pública del PDF en Supabase Storage.');
+  }
+
+  return {
+    publicUrl: data.publicUrl,
+    storagePath: CATALOG_PDF_STORAGE_PATH,
+  };
+}
+
 
 
