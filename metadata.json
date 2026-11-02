@@ -1,0 +1,6 @@
+{
+  "name": "Sheló NABEL — Catálogo Digital y Tienda Oficial",
+  "description": "Catálogo interactivo de belleza, naturaleza y bienestar Sheló NABEL por Yesenia Jiménez en Hermosillo, Sonora. Compra en línea y pide por WhatsApp.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

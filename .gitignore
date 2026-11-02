@@ -1,0 +1,14 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+public/assets/catalog_pages/
+.aistudio/
+public/assets/aistudio/IMG-20261020-WA0027_c04a4874.jpg
+public/assets/aistudio/Screenshot_20261020_144209_01ce81a1.jpg
+public/assets/aistudio/Screenshot_20261020_150851_f3a23d68.jpg
+public/assets/aistudio/Catalogo_Shelo_NABEL2026_SyG_fd41deed.pdf
