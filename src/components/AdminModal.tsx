@@ -1,7 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Product, Category, AdminStatus } from '../types';
+import { Product, Category, AdminStatus, PromotionItem } from '../types';
 import { supabase } from '../lib/supabaseClient';
-import { uploadCatalogPdfToSupabase } from '../lib/supabaseCatalog';
+import {
+  uploadCatalogPdfToSupabase,
+  syncProductsBatchToSupabase,
+  syncAllApartadosToSupabase,
+} from '../lib/supabaseCatalog';
 import {
   X,
   Lock,
@@ -19,6 +23,7 @@ import {
   FileText,
   Database,
   AlertCircle,
+  Sparkles,
 } from 'lucide-react';
 
 interface AdminModalProps {
@@ -37,6 +42,9 @@ interface AdminModalProps {
   onDeleteProduct: (productId: string) => Promise<void>;
   onSaveCategory: (categoryId: string, updates: Partial<Category>) => Promise<void>;
   onUploadFile: (file: File, key?: string) => Promise<string>;
+  promotions?: PromotionItem[];
+  initialEditPromotion?: PromotionItem | null;
+  onSavePromotion?: (promoId: string, updates: Partial<PromotionItem>) => Promise<void>;
   isSupabaseConnected?: boolean;
   supabaseWarning?: string;
   hasSupabaseSession?: boolean;
@@ -59,6 +67,9 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   onDeleteProduct,
   onSaveCategory,
   onUploadFile,
+  promotions = [],
+  initialEditPromotion = null,
+  onSavePromotion,
   isSupabaseConnected = false,
   supabaseWarning = '',
   hasSupabaseSession = false,
@@ -74,13 +85,16 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [sbAuthError, setSbAuthError] = useState('');
   const [sbAuthLoading, setSbAuthLoading] = useState(false);
   const [uploadingCatalogPdf, setUploadingCatalogPdf] = useState(false);
+  const [syncingBetterware, setSyncingBetterware] = useState(false);
+  const [syncingAllApartados, setSyncingAllApartados] = useState(false);
   const [catalogPdfUploadResult, setCatalogPdfUploadResult] = useState<{
     storagePath: string;
     publicUrl: string;
   } | null>(null);
   const [catalogPdfUploadError, setCatalogPdfUploadError] = useState('');
 
-  const [activeTab, setActiveTab] = useState<'edit-product' | 'new-product' | 'edit-category'>('edit-product');
+  const [activeTab, setActiveTab] = useState<'edit-product' | 'new-product' | 'edit-category' | 'edit-promotion'>('edit-product');
+  const [adminBrandFilter, setAdminBrandFilter] = useState<'all' | 'shelo' | 'betterware'>('all');
 
   // Selected Product State
   const [selectedProductId, setSelectedProductId] = useState<string>(
@@ -95,6 +109,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [prodCatalogPage, setProdCatalogPage] = useState('');
   const [prodDescription, setProdDescription] = useState('');
   const [prodImageUrl, setProdImageUrl] = useState('');
+  const [prodBrand, setProdBrand] = useState<'shelo' | 'betterware'>('shelo');
   const [imageMode, setImageMode] = useState<'upload' | 'url'>('upload');
 
   // Selected Category State
@@ -106,6 +121,17 @@ export const AdminModal: React.FC<AdminModalProps> = ({
   const [catDescription, setCatDescription] = useState('');
   const [catImageUrl, setCatImageUrl] = useState('');
 
+  // Selected Promotion State
+  const [selectedPromoId, setSelectedPromoId] = useState<string>(
+    initialEditPromotion?.id || promotions[0]?.id || 'promo-01'
+  );
+  const [promoTitle, setPromoTitle] = useState('');
+  const [promoSubtitle, setPromoSubtitle] = useState('');
+  const [promoBadgeText, setPromoBadgeText] = useState('');
+  const [promoPrice, setPromoPrice] = useState('300');
+  const [promoDescription, setPromoDescription] = useState('');
+  const [promoImageUrl, setPromoImageUrl] = useState('');
+
   // Status Feedback
   const [uploadingImage, setUploadingImage] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -114,17 +140,21 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const catFileInputRef = useRef<HTMLInputElement>(null);
+  const promoFileInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync when modal opens with a specific product or category
+  // Sync when modal opens with a specific product, category, or promotion
   useEffect(() => {
-    if (initialEditCategory) {
+    if (initialEditPromotion) {
+      setActiveTab('edit-promotion');
+      setSelectedPromoId(initialEditPromotion.id);
+    } else if (initialEditCategory) {
       setActiveTab('edit-category');
       setSelectedCatId(initialEditCategory.id);
     } else if (initialEditProduct) {
       setActiveTab('edit-product');
       setSelectedProductId(initialEditProduct.id);
     }
-  }, [initialEditProduct, initialEditCategory]);
+  }, [initialEditProduct, initialEditCategory, initialEditPromotion]);
 
   // Populate product fields when selection or tab changes
   useEffect(() => {
@@ -141,6 +171,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         setProdCatalogPage(target.catalogPage);
         setProdDescription(target.description);
         setProdImageUrl(target.imageUrl);
+        setProdBrand(target.brand === 'betterware' ? 'betterware' : 'shelo');
       }
     } else if (activeTab === 'new-product') {
       setProdName('');
@@ -152,6 +183,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       setProdCatalogPage('01');
       setProdDescription('');
       setProdImageUrl('/assets/catalog/page_003.jpg');
+      setProdBrand('shelo');
     }
   }, [activeTab, selectedProductId, products, categories]);
 
@@ -166,6 +198,20 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       setCatImageUrl(cat.imageUrl);
     }
   }, [selectedCatId, categories]);
+
+  // Populate promotion fields
+  useEffect(() => {
+    const promo = promotions.find((p) => p.id === selectedPromoId) || promotions[0];
+    if (promo) {
+      setSelectedPromoId(promo.id);
+      setPromoTitle(promo.title);
+      setPromoSubtitle(promo.subtitle);
+      setPromoBadgeText(promo.badgeText);
+      setPromoPrice(String(promo.price ?? 300));
+      setPromoDescription(promo.description);
+      setPromoImageUrl(promo.imageUrl);
+    }
+  }, [selectedPromoId, promotions]);
 
   if (!isOpen) return null;
 
@@ -240,7 +286,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     }
   };
 
-  const handleUploadCatalogPdfToSupabase = async () => {
+  const handleUploadCatalogPdfToSupabase = async (brand: 'shelo' | 'betterware' = 'shelo') => {
     setCatalogPdfUploadError('');
     setCatalogPdfUploadResult(null);
     if (!supabase || !hasSupabaseSession) {
@@ -249,18 +295,22 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     }
     setUploadingCatalogPdf(true);
     try {
-      const res = await fetch('/api/catalog/pdf', {
+      const endpoint =
+        brand === 'betterware'
+          ? '/api/catalog/betterware/pdf?source=local'
+          : '/api/catalog/pdf?source=local';
+      const res = await fetch(endpoint, {
         method: 'GET',
-        credentials: 'include',
+        credentials: 'same-origin',
       });
       if (!res.ok) {
-        throw new Error(`No se pudo obtener el PDF desde /api/catalog/pdf (HTTP ${res.status}).`);
+        throw new Error(`No se pudo obtener el PDF desde ${endpoint} (HTTP ${res.status}).`);
       }
       const pdfBlob = await res.blob();
       if (!pdfBlob || pdfBlob.size === 0) {
-        throw new Error('El archivo PDF obtenido desde /api/catalog/pdf está vacío.');
+        throw new Error(`El archivo PDF obtenido desde ${endpoint} está vacío.`);
       }
-      const result = await uploadCatalogPdfToSupabase(pdfBlob);
+      const result = await uploadCatalogPdfToSupabase(pdfBlob, brand);
       setCatalogPdfUploadResult(result);
     } catch (err) {
       const msg =
@@ -273,9 +323,69 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     }
   };
 
+  const handleSyncBetterwareToSupabase = async () => {
+    setCatalogPdfUploadError('');
+    setOperationError('');
+    setStatusMessage('');
+    if (!supabase || !hasSupabaseSession) {
+      setCatalogPdfUploadError('Debes iniciar sesión en Supabase para sincronizar el catálogo.');
+      return;
+    }
+    const bwProducts = products.filter((p) => p.brand === 'betterware');
+    if (bwProducts.length === 0) return;
+
+    setSyncingBetterware(true);
+    try {
+      const count = await syncProductsBatchToSupabase(bwProducts);
+      setStatusMessage(
+        `¡${count} productos del Catálogo Betterware Noviembre 2026 sincronizados automáticamente en Supabase (public.products)!`
+      );
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Error al sincronizar los productos de Betterware en Supabase.';
+      setCatalogPdfUploadError(msg);
+    } finally {
+      setSyncingBetterware(false);
+    }
+  };
+
+  const handleSyncAllApartadosToSupabase = async () => {
+    setCatalogPdfUploadError('');
+    setOperationError('');
+    setStatusMessage('');
+    if (!supabase || !hasSupabaseSession) {
+      setCatalogPdfUploadError(
+        'Debes iniciar sesión en Supabase para sincronizar todos los apartados.'
+      );
+      return;
+    }
+
+    setSyncingAllApartados(true);
+    try {
+      const { totalSynced } = await syncAllApartadosToSupabase(
+        products,
+        categories,
+        promotions
+      );
+      setStatusMessage(
+        `¡Sincronización completa exitosa! ${totalSynced} registros (Sheló NABEL + Betterware + Promociones + Categorías) guardados en Supabase.`
+      );
+    } catch (err) {
+      const msg =
+        err instanceof Error
+          ? err.message
+          : 'Error al sincronizar todos los apartados en Supabase.';
+      setCatalogPdfUploadError(msg);
+    } finally {
+      setSyncingAllApartados(false);
+    }
+  };
+
   const handleComputerFileUpload = async (
     e: React.ChangeEvent<HTMLInputElement>,
-    target: 'product' | 'category'
+    target: 'product' | 'category' | 'promotion'
   ) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -283,10 +393,17 @@ export const AdminModal: React.FC<AdminModalProps> = ({
     setStatusMessage('');
     setOperationError('');
     try {
-      const uploadKey = target === 'product' ? prodClave || 'producto' : selectedCatId || 'categoria';
+      const uploadKey =
+        target === 'product'
+          ? prodClave || 'producto'
+          : target === 'promotion'
+          ? selectedPromoId || 'promo'
+          : selectedCatId || 'categoria';
       const uploadedUrl = await onUploadFile(file, uploadKey);
       if (target === 'product') {
         setProdImageUrl(uploadedUrl);
+      } else if (target === 'promotion') {
+        setPromoImageUrl(uploadedUrl);
       } else {
         setCatImageUrl(uploadedUrl);
       }
@@ -297,6 +414,34 @@ export const AdminModal: React.FC<AdminModalProps> = ({
       setOperationError(message);
     } finally {
       setUploadingImage(false);
+    }
+  };
+
+  const handleSavePromotionSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedPromoId || !onSavePromotion) return;
+    setSaving(true);
+    setStatusMessage('');
+    setOperationError('');
+    try {
+      await onSavePromotion(selectedPromoId, {
+        title: promoTitle,
+        subtitle: promoSubtitle,
+        badgeText: promoBadgeText,
+        price: Number(promoPrice) || 0,
+        description: promoDescription,
+        imageUrl: promoImageUrl,
+      });
+      setStatusMessage(
+        hasSupabaseSession
+          ? '¡Promoción actualizada y guardada automáticamente en Supabase y en la página!'
+          : '¡Título e imagen de la promoción actualizados en tiempo real!'
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Error al actualizar la promoción.';
+      setOperationError(message);
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -317,6 +462,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
           catalogPage: prodCatalogPage,
           description: prodDescription,
           imageUrl: prodImageUrl,
+          brand: prodBrand,
         });
         setStatusMessage(
           hasSupabaseSession
@@ -325,8 +471,8 @@ export const AdminModal: React.FC<AdminModalProps> = ({
         );
       } else if (activeTab === 'new-product') {
         await onCreateProduct({
-          name: prodName || 'Nuevo Producto Sheló NABEL',
-          clave: prodClave || 'SN2026',
+          name: prodName || (prodBrand === 'betterware' ? 'Nuevo Producto Betterware' : 'Nuevo Producto Sheló NABEL'),
+          clave: prodClave || (prodBrand === 'betterware' ? 'BW2026' : 'SN2026'),
           subtitle: prodSubtitle,
           presentation: prodPresentation,
           price: Number(prodPrice) || 199,
@@ -334,6 +480,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
           catalogPage: prodCatalogPage,
           description: prodDescription,
           imageUrl: prodImageUrl,
+          brand: prodBrand,
         });
         setStatusMessage(
           hasSupabaseSession
@@ -428,7 +575,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
             </div>
             <div>
               <h2 className="text-base sm:text-lg font-bold">
-                Panel Administrativo · Sheló NABEL
+                Panel Administrativo · Sheló NABEL &amp; Betterware
               </h2>
               <p className="text-xs text-slate-300">
                 {isAdmin
@@ -516,7 +663,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
             <div>
               <label className="block text-xs font-semibold uppercase tracking-wider text-slate-600 mb-2 text-center">
-                Clave de Seguridad
+                Clave de Seguridad (****)
               </label>
               <input
                 type="password"
@@ -526,6 +673,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 maxLength={12}
                 autoFocus
                 required
+                autoComplete="off"
                 className="w-full px-4 py-3.5 text-center text-2xl tracking-[0.5em] font-mono-num rounded-2xl border-2 border-slate-200 focus:outline-none focus:border-sky-600 bg-slate-50"
               />
             </div>
@@ -596,24 +744,101 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     <div className="flex flex-wrap items-center gap-2 shrink-0">
                       <button
                         type="button"
-                        onClick={handleUploadCatalogPdfToSupabase}
-                        disabled={uploadingCatalogPdf || sbAuthLoading}
+                        onClick={handleSyncAllApartadosToSupabase}
+                        disabled={
+                          syncingAllApartados ||
+                          syncingBetterware ||
+                          uploadingCatalogPdf ||
+                          sbAuthLoading
+                        }
+                        className="px-3.5 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors shadow-2xs"
+                        title="Sincronizar los 3 apartados completos (33 Sheló NABEL + 50 Betterware + 2 Promociones + 24 Categorías) en Supabase"
+                      >
+                        <Database className="w-3.5 h-3.5" />
+                        <span>
+                          {syncingAllApartados
+                            ? 'Sincronizando Todo…'
+                            : `Sincronizar Todo (${products.length + promotions.length})`}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleSyncBetterwareToSupabase}
+                        disabled={
+                          syncingBetterware ||
+                          syncingAllApartados ||
+                          uploadingCatalogPdf ||
+                          sbAuthLoading
+                        }
+                        className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                        title="Guardar o actualizar todos los productos de Betterware en la tabla public.products de Supabase"
+                      >
+                        <Database className="w-3.5 h-3.5" />
+                        <span>
+                          {syncingBetterware
+                            ? 'Sincronizando…'
+                            : `Sincronizar Betterware (${products.filter((p) => p.brand === 'betterware').length})`}
+                        </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleUploadCatalogPdfToSupabase('shelo')}
+                        disabled={
+                          uploadingCatalogPdf ||
+                          syncingBetterware ||
+                          syncingAllApartados ||
+                          sbAuthLoading
+                        }
                         className="px-3.5 py-2 rounded-xl bg-sky-700 hover:bg-sky-800 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                        title="Subir PDF oficial de Sheló NABEL (148 págs) a Supabase Storage"
                       >
                         <Upload className="w-3.5 h-3.5" />
                         <span>
                           {uploadingCatalogPdf
                             ? 'Subiendo…'
-                            : 'Subir PDF del catálogo a Supabase Storage'}
+                            : 'Subir PDF Sheló NABEL'}
                         </span>
                       </button>
                       <button
                         type="button"
+                        onClick={() => handleUploadCatalogPdfToSupabase('betterware')}
+                        disabled={
+                          uploadingCatalogPdf ||
+                          syncingBetterware ||
+                          syncingAllApartados ||
+                          sbAuthLoading
+                        }
+                        className="px-3.5 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 disabled:opacity-50 text-white text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                        title="Subir PDF oficial de Betterware Noviembre 2026 (118 págs) a Supabase Storage"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>
+                          {uploadingCatalogPdf
+                            ? 'Subiendo…'
+                            : 'Subir PDF Betterware'}
+                        </span>
+                      </button>
+                      <a
+                        href="/api/admin/sql/full-setup"
+                        download="Supabase_Completo_Shelo_Betterware_Promociones_2026.sql"
+                        className="px-3.5 py-2 rounded-xl bg-white hover:bg-slate-100 border border-slate-300 text-slate-800 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                        title="Descargar script SQL completo con la estructura y los 85 registros de Sheló NABEL, Betterware y Promociones"
+                      >
+                        <FileText className="w-3.5 h-3.5 text-sky-700" />
+                        <span>Descargar SQL Completo</span>
+                      </a>
+                      <button
+                        type="button"
                         onClick={handleSupabaseLogoutClick}
-                        disabled={sbAuthLoading || uploadingCatalogPdf}
+                        disabled={
+                          sbAuthLoading ||
+                          uploadingCatalogPdf ||
+                          syncingBetterware ||
+                          syncingAllApartados
+                        }
                         className="px-3.5 py-2 rounded-xl bg-slate-200 hover:bg-slate-300 disabled:opacity-50 text-slate-800 text-xs font-semibold whitespace-nowrap transition-colors"
                       >
-                        {sbAuthLoading ? 'Cerrando...' : 'Cerrar sesión de Supabase'}
+                        {sbAuthLoading ? 'Cerrando...' : 'Cerrar sesión'}
                       </button>
                     </div>
                   </div>
@@ -682,6 +907,19 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                       {sbAuthLoading ? 'Iniciando sesión...' : 'Iniciar sesión en Supabase'}
                     </button>
                   </div>
+                  <div className="pt-1 flex items-center justify-between flex-wrap gap-2">
+                    <span className="text-[11px] text-slate-500">
+                      ¿Aún no ejecutas el SQL en Supabase? Descarga el archivo con la estructura y los 3 apartados completos:
+                    </span>
+                    <a
+                      href="/api/admin/sql/full-setup"
+                      download="Supabase_Completo_Shelo_Betterware_Promociones_2026.sql"
+                      className="px-3 py-1.5 rounded-lg bg-white hover:bg-slate-100 border border-slate-300 text-slate-800 text-xs font-semibold flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                    >
+                      <FileText className="w-3.5 h-3.5 text-sky-700" />
+                      <span>Descargar SQL Completo (Sheló + Betterware + Promociones)</span>
+                    </a>
+                  </div>
                 </form>
               )}
 
@@ -743,7 +981,24 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                 }`}
               >
                 <Layers className="w-4 h-4 text-purple-600" />
-                <span>Editar Menú Índice (WA0027)</span>
+                <span>Editar Menú Índice</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveTab('edit-promotion');
+                  setStatusMessage('');
+                  setOperationError('');
+                }}
+                className={`flex-1 py-2.5 px-4 rounded-xl text-xs sm:text-sm font-semibold flex items-center justify-center gap-2 transition-colors whitespace-nowrap ${
+                  activeTab === 'edit-promotion'
+                    ? 'bg-white text-slate-900 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Sparkles className="w-4 h-4 text-amber-600" />
+                <span>Editar Promociones ({promotions.length})</span>
               </button>
             </div>
 
@@ -761,7 +1016,172 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               </div>
             )}
 
-            {activeTab === 'edit-category' ? (
+            {activeTab === 'edit-promotion' ? (
+              /* Edit Promotion Title & Large Image */
+              <form onSubmit={handleSavePromotionSubmit} className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+                <div className="lg:col-span-7 space-y-4">
+                  <div>
+                    <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
+                      Seleccionar Promoción del Apartado
+                    </label>
+                    <select
+                      value={selectedPromoId}
+                      onChange={(e) => {
+                        setSelectedPromoId(e.target.value);
+                        setStatusMessage('');
+                      }}
+                      className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-white"
+                    >
+                      {promotions.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          [{p.clave}] {p.title}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Título de la Promoción
+                    </label>
+                    <input
+                      type="text"
+                      value={promoTitle}
+                      onChange={(e) => setPromoTitle(e.target.value)}
+                      required
+                      className="w-full px-3.5 py-2 text-sm font-semibold rounded-xl border border-slate-200"
+                    />
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Subtítulo
+                      </label>
+                      <input
+                        type="text"
+                        value={promoSubtitle}
+                        onChange={(e) => setPromoSubtitle(e.target.value)}
+                        className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Etiqueta Destacada
+                      </label>
+                      <input
+                        type="text"
+                        value={promoBadgeText}
+                        onChange={(e) => setPromoBadgeText(e.target.value)}
+                        className="w-full px-3.5 py-2 text-sm font-mono-num rounded-xl border border-slate-200"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Inversión / Precio MXN
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        value={promoPrice}
+                        onChange={(e) => setPromoPrice(e.target.value)}
+                        className="w-full px-3.5 py-2 text-sm font-mono-num font-bold rounded-xl border border-slate-200"
+                      />
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-700 mb-1">
+                      Descripción de la Promoción
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={promoDescription}
+                      onChange={(e) => setPromoDescription(e.target.value)}
+                      className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200"
+                    />
+                  </div>
+
+                  {/* Image Source Selector for Promotion */}
+                  <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-3">
+                    <span className="block text-xs font-bold uppercase tracking-wider text-slate-700">
+                      Cambiar Imagen de la Promoción (Desde Computadora/Celular o URL)
+                    </span>
+                    <div className="flex flex-wrap gap-2">
+                      <input
+                        ref={promoFileInputRef}
+                        type="file"
+                        accept="image/*"
+                        onChange={(e) => handleComputerFileUpload(e, 'promotion')}
+                        className="hidden"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => promoFileInputRef.current?.click()}
+                        disabled={uploadingImage}
+                        className="px-4 py-2.5 rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-xs font-semibold flex items-center gap-2 transition-colors"
+                      >
+                        <Upload className="w-4 h-4" />
+                        <span>
+                          {uploadingImage ? 'Subiendo archivo...' : 'Subir Nueva Imagen desde mi Dispositivo'}
+                        </span>
+                      </button>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-medium text-slate-600 mb-1">
+                        O pega la URL directa de la imagen:
+                      </label>
+                      <div className="flex items-center gap-2">
+                        <LinkIcon className="w-4 h-4 text-slate-400 shrink-0" />
+                        <input
+                          type="text"
+                          value={promoImageUrl}
+                          onChange={(e) => setPromoImageUrl(e.target.value)}
+                          placeholder="/assets/aistudio/... o https://..."
+                          className="w-full px-3 py-2 text-sm rounded-xl border border-slate-200 bg-white"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={saving}
+                    className="w-full py-3 px-5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-semibold text-sm flex items-center justify-center gap-2 shadow-sm transition-colors"
+                  >
+                    <Save className="w-4 h-4" />
+                    <span>{saving ? 'Guardando...' : 'Guardar Cambios en Promoción'}</span>
+                  </button>
+                </div>
+
+                {/* Live Large Preview of Promotion Card */}
+                <div className="lg:col-span-5 flex flex-col justify-center">
+                  <p className="text-xs font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                    Vista Previa de la Promoción
+                  </p>
+                  <div className="rounded-3xl overflow-hidden border border-slate-200 shadow-md bg-white">
+                    <div className="relative h-72 bg-slate-100 p-2 flex items-center justify-center">
+                      <img
+                        src={promoImageUrl}
+                        alt={promoTitle}
+                        referrerPolicy="no-referrer"
+                        className="w-full h-full object-contain rounded-xl"
+                      />
+                      <div className="absolute top-3 left-3 bg-sky-800/95 text-white px-2.5 py-1 rounded-lg text-[11px] font-bold">
+                        {promoBadgeText}
+                      </div>
+                    </div>
+                    <div className="p-4 space-y-1">
+                      <h4 className="font-bold text-slate-900 text-base">{promoTitle}</h4>
+                      <p className="text-xs font-semibold text-sky-700">{promoSubtitle}</p>
+                      <p className="text-xs text-slate-600 line-clamp-2">{promoDescription}</p>
+                    </div>
+                  </div>
+                </div>
+              </form>
+            ) : activeTab === 'edit-category' ? (
               /* Edit Category in WA0027 Index Menu */
               <form onSubmit={handleSaveCategorySubmit} className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                 <div className="lg:col-span-7 space-y-4">
@@ -779,7 +1199,7 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                     >
                       {categories.map((c) => (
                         <option key={c.id} value={c.id}>
-                          Pág. {c.pageNumber} — {c.name}
+                          [{c.id.startsWith('bw-') ? 'Betterware' : 'Sheló NABEL'}] Pág. {c.pageNumber} — {c.name}
                         </option>
                       ))}
                     </select>
@@ -911,10 +1331,55 @@ export const AdminModal: React.FC<AdminModalProps> = ({
               <form onSubmit={handleSaveProductSubmit} className="grid grid-cols-1 lg:grid-cols-12 gap-6">
                 <div className="lg:col-span-7 space-y-4">
                   {activeTab === 'edit-product' && (
-                    <div>
-                      <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500 mb-1.5">
-                        Seleccionar Producto del Catálogo a Editar
-                      </label>
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <label className="block text-xs font-semibold uppercase tracking-wider text-slate-500">
+                          Seleccionar Producto del Catálogo a Editar
+                        </label>
+                        <div className="inline-flex rounded-lg p-0.5 bg-slate-200/80 text-xs">
+                          <button
+                            type="button"
+                            onClick={() => setAdminBrandFilter('all')}
+                            className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                              adminBrandFilter === 'all'
+                                ? 'bg-white text-slate-900 shadow-2xs'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            Todos ({products.length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAdminBrandFilter('shelo');
+                              const firstShelo = products.find((p) => p.brand !== 'betterware');
+                              if (firstShelo) setSelectedProductId(firstShelo.id);
+                            }}
+                            className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                              adminBrandFilter === 'shelo'
+                                ? 'bg-sky-700 text-white shadow-2xs'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            Sheló ({products.filter((p) => p.brand !== 'betterware').length})
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAdminBrandFilter('betterware');
+                              const firstBw = products.find((p) => p.brand === 'betterware');
+                              if (firstBw) setSelectedProductId(firstBw.id);
+                            }}
+                            className={`px-2.5 py-1 rounded-md font-semibold transition-colors ${
+                              adminBrandFilter === 'betterware'
+                                ? 'bg-amber-600 text-white shadow-2xs'
+                                : 'text-slate-600'
+                            }`}
+                          >
+                            Betterware ({products.filter((p) => p.brand === 'betterware').length})
+                          </button>
+                        </div>
+                      </div>
                       <select
                         value={selectedProductId}
                         onChange={(e) => {
@@ -923,17 +1388,25 @@ export const AdminModal: React.FC<AdminModalProps> = ({
                         }}
                         className="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-white"
                       >
-                        {products.map((p) => (
-                          <option key={p.id} value={p.id}>
-                            [{p.clave}] {p.name} — ${p.price} MXN
-                          </option>
-                        ))}
+                        {products
+                          .filter((p) =>
+                            adminBrandFilter === 'all'
+                              ? true
+                              : adminBrandFilter === 'betterware'
+                              ? p.brand === 'betterware'
+                              : p.brand !== 'betterware'
+                          )
+                          .map((p) => (
+                            <option key={p.id} value={p.id}>
+                              [{p.brand === 'betterware' ? 'Betterware' : 'Sheló'} · {p.clave}] {p.name} — ${p.price} MXN
+                            </option>
+                          ))}
                       </select>
                     </div>
                   )}
 
-                  {/* Price & Clave Highlight Box */}
-                  <div className="p-4 rounded-2xl bg-sky-50/80 border border-sky-200 grid grid-cols-1 sm:grid-cols-3 gap-4">
+                  {/* Price, Clave, Brand & Presentation Highlight Box */}
+                  <div className="p-4 rounded-2xl bg-sky-50/80 border border-sky-200 grid grid-cols-1 sm:grid-cols-4 gap-4">
                     <div>
                       <label className="block text-xs font-bold text-sky-900 mb-1">
                         Precio en Imagen ($ MXN)
@@ -969,13 +1442,51 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1">
+                        Marca del Catálogo
+                      </label>
+                      <select
+                        value={prodBrand}
+                        onChange={(e) => {
+                          const nextBrand = e.target.value as 'shelo' | 'betterware';
+                          setProdBrand(nextBrand);
+                          const brandCats = categories.filter((c) =>
+                            nextBrand === 'betterware'
+                              ? c.id.startsWith('bw-')
+                              : !c.id.startsWith('bw-')
+                          );
+                          if (brandCats.length > 0 && !brandCats.some((c) => c.id === prodCategoryId)) {
+                            setProdCategoryId(brandCats[0].id);
+                          }
+                          if (activeTab === 'new-product') {
+                            if (nextBrand === 'betterware') {
+                              setProdClave('26999');
+                              setProdSubtitle('Soluciones Prácticas para tu Hogar');
+                              setProdPresentation('1 pza');
+                              setProdImageUrl('/assets/betterware/page_001.jpg');
+                            } else {
+                              setProdClave('S1750');
+                              setProdSubtitle('Calidad Natural Sheló NABEL');
+                              setProdPresentation('250 ml');
+                              setProdImageUrl('/assets/catalog/page_003.jpg');
+                            }
+                          }
+                        }}
+                        className="w-full px-3 py-2 text-sm rounded-xl border border-slate-200 bg-white font-medium"
+                      >
+                        <option value="shelo">Sheló NABEL</option>
+                        <option value="betterware">Betterware</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-700 mb-1">
                         Contenido / Presentación
                       </label>
                       <input
                         type="text"
                         value={prodPresentation}
                         onChange={(e) => setProdPresentation(e.target.value)}
-                        placeholder="Ej. 250 ml"
+                        placeholder="Ej. 250 ml o 1 pza"
                         className="w-full px-3 py-2 text-sm rounded-xl border border-slate-200 bg-white"
                       />
                     </div>
@@ -1076,18 +1587,24 @@ export const AdminModal: React.FC<AdminModalProps> = ({
 
                     <div>
                       <label className="block text-xs font-semibold text-slate-700 mb-1">
-                        Categoría en el Menú Índice
+                        Categoría en el Menú Índice ({prodBrand === 'betterware' ? 'Betterware' : 'Sheló NABEL'})
                       </label>
                       <select
                         value={prodCategoryId}
                         onChange={(e) => setProdCategoryId(e.target.value)}
                         className="w-full px-3.5 py-2 text-sm rounded-xl border border-slate-200 bg-white"
                       >
-                        {categories.map((c) => (
-                          <option key={c.id} value={c.id}>
-                            Pág. {c.pageNumber} · {c.name}
-                          </option>
-                        ))}
+                        {categories
+                          .filter((c) =>
+                            prodBrand === 'betterware'
+                              ? c.id.startsWith('bw-')
+                              : !c.id.startsWith('bw-')
+                          )
+                          .map((c) => (
+                            <option key={c.id} value={c.id}>
+                              Pág. {c.pageNumber} · {c.name}
+                            </option>
+                          ))}
                       </select>
                     </div>
                   </div>

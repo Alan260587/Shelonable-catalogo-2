@@ -10,6 +10,7 @@ interface CatalogIndexMenuProps {
   isAdmin: boolean;
   onEditCategory: (category: Category) => void;
   onOpenPdfViewer: (pageNumber?: number) => void;
+  currentBrand?: 'shelo' | 'betterware';
 }
 
 export const CatalogIndexMenu: React.FC<CatalogIndexMenuProps> = ({
@@ -20,7 +21,16 @@ export const CatalogIndexMenu: React.FC<CatalogIndexMenuProps> = ({
   isAdmin,
   onEditCategory,
   onOpenPdfViewer,
+  currentBrand = 'shelo',
 }) => {
+  const isBetterware = currentBrand === 'betterware';
+  const subtitle = isBetterware
+    ? 'Estructura Oficial del Catálogo Betterware Noviembre 2026'
+    : 'Estructura Oficial del Catálogo Sheló NABEL 2026';
+  const pdfButtonText = isBetterware
+    ? 'Ver Catálogo Betterware PDF (118 Págs)'
+    : 'Ver Catálogo Sheló NABEL PDF (148 Págs)';
+
   return (
     <section id="indice-catalogo" className="py-12 px-4 sm:px-6 lg:px-8 max-w-[1360px] mx-auto">
       {/* Header styled after WA0027 "Índice" */}
@@ -28,7 +38,7 @@ export const CatalogIndexMenu: React.FC<CatalogIndexMenuProps> = ({
         <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-8 border-b border-slate-100">
           <div>
             <p className="text-xs font-medium tracking-widest uppercase text-sky-700 mb-2">
-              Estructura Oficial del Catálogo Sheló NABEL 2026
+              {subtitle}
             </p>
             <h2
               className="text-4xl sm:text-6xl font-normal tracking-tight text-slate-700"
@@ -61,7 +71,7 @@ export const CatalogIndexMenu: React.FC<CatalogIndexMenuProps> = ({
               className="px-4 py-2.5 rounded-xl text-sm font-semibold bg-sky-50 text-sky-800 hover:bg-sky-100 border border-sky-200 transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
             >
               <BookOpen className="w-4 h-4" />
-              <span>Ver Catálogo PDF Completo</span>
+              <span>{pdfButtonText}</span>
             </button>
           </div>
         </div>
@@ -183,12 +193,14 @@ export const CatalogIndexMenu: React.FC<CatalogIndexMenuProps> = ({
           })}
         </div>
 
-        {/* Reference strip to view original WA0027 index image if desired */}
+        {/* Reference strip to view original index info */}
         <div className="mt-8 pt-6 border-t border-slate-100 flex flex-col sm:flex-row items-center justify-between gap-4 text-xs text-slate-500">
           <div className="flex items-center gap-2">
-            <Sparkles className="w-4 h-4 text-sky-600 shrink-0" />
+            <Sparkles className={`w-4 h-4 shrink-0 ${isBetterware ? 'text-amber-600' : 'text-sky-600'}`} />
             <span>
-              Menú interactivo estructurado sobre el Índice Oficial Sheló NABEL 2026 (Páginas 01 a 142).
+              {isBetterware
+                ? 'Menú interactivo estructurado sobre el Catálogo Oficial Betterware Noviembre 2026 (Páginas 01 a 118).'
+                : 'Menú interactivo estructurado sobre el Índice Oficial Sheló NABEL 2026 (Páginas 01 a 142).'}
             </span>
           </div>
           {selectedCategoryId && (

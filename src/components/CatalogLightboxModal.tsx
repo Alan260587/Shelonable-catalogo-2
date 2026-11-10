@@ -20,25 +20,36 @@ interface CatalogLightboxModalProps {
   product: Product | null;
   showFullPdfModal: boolean;
   initialPdfPage?: number;
+  catalogBrand?: 'shelo' | 'betterware';
   categories?: Category[];
   deviceInfo?: DeviceInfo;
   onClose: () => void;
   onAddToCart: (product: Product, quantity: number) => void;
   isAdmin: boolean;
   onEditProduct: (product: Product) => void;
+  onOpenPdfAtPage?: (page: number) => void;
 }
 
 export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
   product,
   showFullPdfModal,
   initialPdfPage = 1,
+  catalogBrand = 'shelo',
   categories = [],
   deviceInfo,
   onClose,
   onAddToCart,
   isAdmin,
   onEditProduct,
+  onOpenPdfAtPage,
 }) => {
+  const isBetterware = (product?.brand === 'betterware') || catalogBrand === 'betterware';
+  const totalPages = isBetterware ? 118 : 148;
+  const catalogTitle = isBetterware ? 'Catálogo Betterware Noviembre 2026' : 'Catálogo Oficial Sheló NABEL 2026';
+  const pdfDownloadEndpoint = isBetterware ? '/api/catalog/betterware/pdf' : '/api/catalog/pdf';
+  const pdfDownloadFilename = isBetterware ? 'Catalogo_Betterware_Noviembre_2026.pdf' : 'Catalogo_Shelo_NABEL_2026.pdf';
+  const pageImageEndpoint = (page: number) => isBetterware ? `/api/catalog/betterware/page/${page}` : `/api/catalog/page/${page}`;
+
   const [currentPage, setCurrentPage] = useState<number>(initialPdfPage || 1);
   const [pageLoading, setPageLoading] = useState<boolean>(true);
   const [downloadingPdf, setDownloadingPdf] = useState<boolean>(false);
@@ -68,7 +79,7 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
         });
       } else if (showFullPdfModal && e.key === 'ArrowRight') {
         setCurrentPage((p) => {
-          const next = Math.min(148, p + 1);
+          const next = Math.min(totalPages, p + 1);
           if (next !== p) setPageLoading(true);
           return next;
         });
@@ -76,11 +87,11 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [showFullPdfModal, product, onClose]);
+  }, [showFullPdfModal, product, onClose, totalPages]);
 
   if (!product && !showFullPdfModal) return null;
 
-  // In-iframe authenticated Blob download for full 46MB PDF (prevents mobile cookie interstitial error)
+  // In-iframe authenticated Blob download for full PDF (prevents mobile cookie interstitial error)
   const handleDownloadFullPdf = async () => {
     if (downloadingPdf) return;
     setDownloadingPdf(true);
@@ -89,9 +100,9 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
     setDownloadMessage('');
 
     try {
-      const response = await fetch('/api/catalog/pdf', {
+      const response = await fetch(pdfDownloadEndpoint, {
         method: 'GET',
-        credentials: 'include',
+        credentials: 'same-origin',
       });
 
       if (!response.ok) {
@@ -105,7 +116,7 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
         );
       }
 
-      const contentLength = Number(response.headers.get('content-length')) || 47577479;
+      const contentLength = Number(response.headers.get('content-length')) || (isBetterware ? 27262976 : 47577479);
       const reader = response.body?.getReader();
 
       let blob: Blob;
@@ -128,7 +139,7 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
       }
 
       setDownloadProgress(100);
-      const fileName = 'Catalogo_Shelo_NABEL_2026.pdf';
+      const fileName = pdfDownloadFilename;
 
       // On iOS / Mobile supporting Web Share API for files, offer native share/save sheet if preferred
       if (
@@ -141,7 +152,7 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
           try {
             await navigator.share({
               files: [fileObj],
-              title: 'Catálogo Sheló NABEL 2026',
+              title: catalogTitle,
             });
             setDownloadMessage('¡Catálogo PDF compartido/guardado en tu iPhone/iPad!');
             return;
@@ -161,7 +172,7 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
 
       setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
       setDownloadMessage(
-        `¡Catálogo PDF descargado correctamente en tu ${deviceInfo?.machineLabel || 'dispositivo'} (${deviceInfo?.os || 'Web'})!`
+        `¡${catalogTitle} descargado correctamente en tu ${deviceInfo?.machineLabel || 'dispositivo'} (${deviceInfo?.os || 'Web'})!`
       );
     } catch (err) {
       console.error('Error downloading PDF:', err);
@@ -179,12 +190,13 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
     setDownloadingPageImg(true);
     setDownloadError('');
     try {
-      const res = await fetch(`/api/catalog/page/${currentPage}`, {
-        credentials: 'include',
+      const res = await fetch(pageImageEndpoint(currentPage), {
+        credentials: 'same-origin',
       });
       if (!res.ok) throw new Error('No se pudo descargar la imagen de la página.');
       const blob = await res.blob();
-      const fileName = `Shelo_NABEL_2026_Pagina_${String(currentPage).padStart(3, '0')}.jpg`;
+      const prefix = isBetterware ? 'Betterware_2026' : 'Shelo_NABEL_2026';
+      const fileName = `${prefix}_Pagina_${String(currentPage).padStart(3, '0')}.jpg`;
 
       if (
         deviceInfo?.isMobileOrTablet &&
@@ -196,7 +208,7 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
           try {
             await navigator.share({
               files: [fileObj],
-              title: `Sheló NABEL Página ${currentPage}`,
+              title: `${catalogTitle} - Página ${currentPage}`,
             });
             setDownloadMessage(`¡Página ${currentPage} lista para guardar o compartir!`);
             return;
@@ -234,10 +246,10 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
               <BookOpen className="w-5 h-5 text-sky-400 shrink-0" />
               <div>
                 <h3 className="text-sm sm:text-base font-bold leading-tight">
-                  Catálogo Oficial Sheló NABEL 2026
+                  {catalogTitle}
                 </h3>
                 <p className="text-[11px] text-slate-300 font-mono-num">
-                  Página {currentPage} de 148
+                  Página {currentPage} de {totalPages}
                   {deviceInfo ? ` · Optimizado para ${deviceInfo.machineLabel} (${deviceInfo.os})` : ''}
                 </p>
               </div>
@@ -379,19 +391,19 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
               <div className="absolute inset-0 flex flex-col items-center justify-center bg-slate-100/80 z-10 gap-2">
                 <Loader2 className="w-8 h-8 text-sky-700 animate-spin" />
                 <span className="text-xs font-semibold text-slate-600">
-                  Cargando página {currentPage} de 148...
+                  Cargando página {currentPage} de {totalPages}...
                 </span>
               </div>
             )}
 
             <img
-              key={currentPage}
-              src={`/api/catalog/page/${currentPage}`}
-              alt={`Catálogo Sheló NABEL 2026 - Página ${currentPage}`}
+              key={`${catalogBrand}-${currentPage}`}
+              src={pageImageEndpoint(currentPage)}
+              alt={`${catalogTitle} - Página ${currentPage}`}
               onLoad={() => setPageLoading(false)}
               onError={(e) => {
                 setPageLoading(false);
-                e.currentTarget.src = '/assets/catalog/page_001.jpg';
+                e.currentTarget.src = isBetterware ? '/assets/betterware/page_001.jpg' : '/assets/catalog/page_001.jpg';
               }}
               className="max-h-full max-w-full object-contain rounded-xl shadow-lg bg-white"
             />
@@ -417,27 +429,27 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
               <input
                 type="number"
                 min={1}
-                max={148}
+                max={totalPages}
                 value={currentPage}
                 onChange={(e) => {
                   const val = parseInt(e.target.value, 10);
-                  if (!Number.isNaN(val) && val >= 1 && val <= 148) {
+                  if (!Number.isNaN(val) && val >= 1 && val <= totalPages) {
                     setCurrentPage(val);
                     setPageLoading(true);
                   }
                 }}
                 className="w-16 px-2 py-1 text-center font-mono-num font-bold rounded-lg border border-slate-300 bg-slate-50"
               />
-              <span className="text-slate-400 font-mono-num">de 148</span>
+              <span className="text-slate-400 font-mono-num">de {totalPages}</span>
             </div>
 
             <button
               type="button"
               onClick={() => {
-                setCurrentPage((p) => Math.min(148, p + 1));
+                setCurrentPage((p) => Math.min(totalPages, p + 1));
                 setPageLoading(true);
               }}
-              disabled={currentPage >= 148}
+              disabled={currentPage >= totalPages}
               className="px-3.5 py-2 rounded-xl bg-sky-700 hover:bg-sky-800 disabled:opacity-40 text-white text-xs sm:text-sm font-semibold flex items-center gap-1.5 transition-colors"
             >
               <span>Siguiente</span>
@@ -450,6 +462,8 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
   }
 
   if (!product) return null;
+
+  const parsedProductPage = Math.max(1, parseInt(String(product.catalogPage).replace(/\D/g, ''), 10) || 1);
 
   return (
     <div
@@ -474,6 +488,11 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
 
           {/* Price Tag on Image */}
           <div className="absolute bottom-4 right-4 bg-slate-900/95 text-white px-4 py-2.5 rounded-2xl shadow-xl border border-sky-400">
+            {product.originalPrice && product.originalPrice > product.price && (
+              <div className="text-[11px] font-mono-num text-rose-300 line-through">
+                Regular: ${product.originalPrice.toLocaleString('es-MX')} MXN
+              </div>
+            )}
             <div className="flex items-baseline gap-1">
               <span className="text-xs font-bold text-sky-400">$</span>
               <span className="text-2xl font-bold font-mono-num">
@@ -514,9 +533,16 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
               <span className="text-xs font-semibold text-slate-500">
                 Precio Oficial ({product.presentation})
               </span>
-              <span className="text-2xl font-bold text-slate-900 font-mono-num">
-                ${product.price.toLocaleString('es-MX')} MXN
-              </span>
+              <div className="text-right">
+                {product.originalPrice && product.originalPrice > product.price && (
+                  <span className="block text-xs font-mono-num text-slate-400 line-through">
+                    ${product.originalPrice.toLocaleString('es-MX')} MXN
+                  </span>
+                )}
+                <span className="text-2xl font-bold text-slate-900 font-mono-num">
+                  ${product.price.toLocaleString('es-MX')} MXN
+                </span>
+              </div>
             </div>
 
             <p className="mt-4 text-sm text-slate-600 leading-relaxed">
@@ -524,7 +550,7 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
             </p>
           </div>
 
-          <div className="mt-8 pt-4 border-t border-slate-100 space-y-3">
+          <div className="mt-8 pt-4 border-t border-slate-100 space-y-2.5">
             <button
               type="button"
               onClick={() => {
@@ -536,6 +562,17 @@ export const CatalogLightboxModal: React.FC<CatalogLightboxModalProps> = ({
               <ShoppingBag className="w-4 h-4" />
               <span>Agregar al Carrito · ${product.price.toLocaleString('es-MX')} MXN</span>
             </button>
+
+            {onOpenPdfAtPage && (
+              <button
+                type="button"
+                onClick={() => onOpenPdfAtPage(parsedProductPage)}
+                className="w-full py-2.5 px-4 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center justify-center gap-2 transition-colors"
+              >
+                <BookOpen className="w-3.5 h-3.5 text-sky-700" />
+                <span>Ver Página {product.catalogPage} en el Visor del Catálogo</span>
+              </button>
+            )}
 
             {isAdmin && (
               <button

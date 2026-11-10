@@ -151,12 +151,17 @@ export const ProductCard: React.FC<ProductCardProps> = ({
                     : `Precio oficial: $${product.price} MXN`
                 }
               >
-                <div className="flex items-baseline gap-1">
+                <div className="flex items-baseline gap-1.5 flex-wrap">
                   <span className="text-xs font-bold text-sky-600">$</span>
                   <span className="text-xl sm:text-2xl font-bold tracking-tight font-mono-num">
                     {product.price.toLocaleString('es-MX')}
                   </span>
                   <span className="text-[11px] font-semibold uppercase opacity-75">MXN</span>
+                  {product.originalPrice && product.originalPrice > product.price && (
+                    <span className="text-[11px] text-slate-400 line-through font-mono-num">
+                      ${product.originalPrice.toLocaleString('es-MX')}
+                    </span>
+                  )}
                 </div>
                 <div className="text-[10px] font-mono-num opacity-80 flex items-center justify-between gap-2">
                   <span>Clave: {product.clave}</span>

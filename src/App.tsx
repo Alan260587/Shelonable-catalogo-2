@@ -5,20 +5,30 @@ import {
   Category,
   CartItem,
   AdminStatus,
+  CatalogBrand,
+  PromotionItem,
 } from './types';
 import { INITIAL_CATALOG_DATA } from './data/initialCatalog';
+import { BETTERWARE_CATALOG_DATA } from './data/betterwareCatalog';
+import { INITIAL_PROMOTIONS } from './data/initialPromotions';
 import { CatalogIndexMenu } from './components/CatalogIndexMenu';
 import { ProductCard } from './components/ProductCard';
 import { CartDrawer } from './components/CartDrawer';
 import { AdminModal } from './components/AdminModal';
 import { CatalogLightboxModal } from './components/CatalogLightboxModal';
+import { PromotionsSection } from './components/PromotionsSection';
 import { useDeviceDetection } from './utils/deviceDetector';
 import { isSupabaseConfigured, supabase } from './lib/supabaseClient';
 import {
   fetchProductsFromSupabase,
+  fetchPromotionsFromSupabase,
   upsertProductToSupabase,
+  upsertCategoryToSupabase,
   uploadProductImageToSupabase,
   deleteProductFromSupabase,
+  subscribeToProductChanges,
+  promotionToProduct,
+  productToPromotion,
 } from './lib/supabaseCatalog';
 import {
   ShoppingBag,
@@ -37,6 +47,7 @@ import {
   Tablet,
   Laptop,
   Monitor,
+  Download,
 } from 'lucide-react';
 
 export default function App() {
@@ -50,8 +61,19 @@ export default function App() {
       : `client-${Date.now()}-${Math.random().toString(36).slice(2)}`
   );
 
-  // Catalog state synced with backend server for all users
+  // Catalog state synced with backend server for Sheló NABEL
   const [catalog, setCatalog] = useState<CatalogData>(INITIAL_CATALOG_DATA);
+
+  // Active brand switcher: 'shelo' (default) | 'betterware' | 'promociones'
+  const [activeBrand, setActiveBrand] = useState<CatalogBrand>('shelo');
+
+  // Betterware catalog state with 11 categories & 50 detailed products
+  const [betterwareCatalog, setBetterwareCatalog] = useState<CatalogData>(
+    BETTERWARE_CATALOG_DATA as unknown as CatalogData
+  );
+
+  // Promotions state (2 large promotional flyers editable in Admin / Supabase)
+  const [promotions, setPromotions] = useState<PromotionItem[]>(INITIAL_PROMOTIONS);
 
   // Ephemeral Admin Session Token (Memory-only: closes automatically on tab close/refresh)
   const [adminToken, setAdminToken] = useState<string | null>(null);
@@ -83,6 +105,7 @@ export default function App() {
   const [isAdminModalOpen, setIsAdminModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
   const [editingCategory, setEditingCategory] = useState<Category | null>(null);
+  const [editingPromotion, setEditingPromotion] = useState<PromotionItem | null>(null);
   const [previewProduct, setPreviewProduct] = useState<Product | null>(null);
   const [showFullPdfModal, setShowFullPdfModal] = useState(false);
   const [pdfStartPage, setPdfStartPage] = useState<number>(1);
@@ -145,26 +168,180 @@ export default function App() {
 
   // Keep cart product prices/images synced if admin updates catalog
   useEffect(() => {
+    const allProducts = [...catalog.products, ...betterwareCatalog.products];
     setCart((prevCart) =>
       prevCart.map((item) => {
-        const updated = catalog.products.find((p) => p.id === item.product.id);
+        const updated = allProducts.find(
+          (p) => p.id === item.product.id || p.clave === item.product.clave
+        );
         return updated ? { ...item, product: updated } : item;
       })
     );
-  }, [catalog.products]);
+  }, [catalog.products, betterwareCatalog.products]);
 
-  // 1. Initial Fetch (Express Server + Optional Supabase Override) & Real-Time SSE Multi-User Connection
+  // 1. Initial Fetch (Express Server + Optional Supabase Override), Supabase Realtime & SSE Multi-User Connection
   useEffect(() => {
     const clientId = clientIdRef.current;
+    let isMounted = true;
+
+    const applySupabaseProducts = (
+      sbProducts: Product[],
+      referenceProducts?: Product[]
+    ) => {
+      if (!isMounted || !sbProducts || sbProducts.length === 0) return;
+
+      const promoSb = sbProducts.filter(
+        (p) =>
+          p.brand === 'promociones' ||
+          p.categoryId === 'promociones-shelo' ||
+          p.clave.toUpperCase().startsWith('PROMO-')
+      );
+      const bwSb = sbProducts.filter((p) => p.brand === 'betterware');
+      const sheloSb = sbProducts.filter(
+        (p) =>
+          p.brand !== 'betterware' &&
+          p.brand !== 'promociones' &&
+          p.categoryId !== 'promociones-shelo' &&
+          !p.clave.toUpperCase().startsWith('PROMO-')
+      );
+
+      if (promoSb.length > 0) {
+        setPromotions((prevPromos) => {
+          const basePromos = prevPromos && prevPromos.length > 0 ? prevPromos : INITIAL_PROMOTIONS;
+          const sbByClave = new Map<string, PromotionItem>(
+            promoSb.map((p) => {
+              const converted = productToPromotion(p);
+              return [converted.clave, converted];
+            })
+          );
+          return basePromos.map((existing) => {
+            const override = sbByClave.get(existing.clave);
+            if (!override) return existing;
+            return {
+              ...existing,
+              ...override,
+              id: existing.id,
+            };
+          });
+        });
+      }
+
+      if (sheloSb.length > 0) {
+        const sheloSeedProducts = INITIAL_CATALOG_DATA.products;
+        const initialByClave = new Map<string, Product>(
+          sheloSeedProducts.map((p) => [p.clave, p])
+        );
+
+        setCatalog((prev) => {
+          const baseProducts =
+            referenceProducts ||
+            (prev.products && prev.products.length > 0 ? prev.products : sheloSeedProducts);
+          const currentByClave = new Map<string, Product>(
+            baseProducts.map((p) => [p.clave, p])
+          );
+          const sbByClave = new Map<string, Product>(
+            sheloSb.map((p) => [p.clave, p])
+          );
+
+          // Update any existing Sheló seed products that have overrides in Supabase
+          const updatedExisting = baseProducts.map((prod) => {
+            const sbOverride = sbByClave.get(prod.clave);
+            if (!sbOverride) return prod;
+            const seedProd = initialByClave.get(prod.clave);
+            return {
+              ...prod,
+              ...sbOverride,
+              id: prod.id || seedProd?.id || sbOverride.id,
+              featured: prod.featured ?? seedProd?.featured ?? sbOverride.featured,
+              priceTagStyle:
+                prod.priceTagStyle ||
+                seedProd?.priceTagStyle ||
+                sbOverride.priceTagStyle ||
+                'blue',
+            };
+          });
+
+          // Append any brand-new Sheló products created in Supabase that weren't in baseProducts
+          const extraFromSb = sheloSb
+            .filter((sbProd) => !currentByClave.has(sbProd.clave))
+            .map((sbProd) => ({
+              ...sbProd,
+              brand: 'shelo' as const,
+              priceTagStyle: sbProd.priceTagStyle || 'blue',
+            }));
+
+          return {
+            ...prev,
+            lastUpdated: new Date().toISOString(),
+            products: [...extraFromSb, ...updatedExisting],
+          };
+        });
+      }
+
+      if (bwSb.length > 0) {
+        const bwSeedProducts = BETTERWARE_CATALOG_DATA.products as unknown as Product[];
+        const bwInitialByClave = new Map<string, Product>(
+          bwSeedProducts.map((p) => [p.clave, p])
+        );
+
+        setBetterwareCatalog((prev) => {
+          const baseProducts = prev.products && prev.products.length > 0 ? prev.products : bwSeedProducts;
+          const currentByClave = new Map<string, Product>(
+            baseProducts.map((p) => [p.clave, p])
+          );
+          const sbByClave = new Map<string, Product>(
+            bwSb.map((p) => [p.clave, p])
+          );
+
+          // Update any existing Betterware seed products that have overrides in Supabase
+          const updatedExisting = baseProducts.map((prod) => {
+            const sbOverride = sbByClave.get(prod.clave);
+            if (!sbOverride) return prod;
+            const seedProd = bwInitialByClave.get(prod.clave);
+            return {
+              ...prod,
+              ...sbOverride,
+              id: prod.id || seedProd?.id || sbOverride.id,
+              originalPrice: prod.originalPrice ?? seedProd?.originalPrice,
+              featured: prod.featured ?? seedProd?.featured ?? sbOverride.featured,
+              priceTagStyle:
+                prod.priceTagStyle || seedProd?.priceTagStyle || sbOverride.priceTagStyle || 'rose',
+            };
+          });
+
+          // Append any brand-new Betterware products created in Supabase that weren't in baseProducts
+          const extraFromSb = bwSb
+            .filter((sbProd) => !currentByClave.has(sbProd.clave))
+            .map((sbProd) => ({
+              ...sbProd,
+              brand: 'betterware' as const,
+              priceTagStyle: sbProd.priceTagStyle || 'rose',
+            }));
+
+          return {
+            ...prev,
+            lastUpdated: new Date().toISOString(),
+            products: [...extraFromSb, ...updatedExisting],
+          };
+        });
+      }
+    };
 
     async function loadInitialCatalog() {
       let localServerCatalog: CatalogData | null = null;
       try {
         const res = await fetch('/api/catalog');
         const data = await res.json();
+        if (!isMounted) return;
         if (data.catalog) {
           localServerCatalog = data.catalog as CatalogData;
           setCatalog(data.catalog);
+        }
+        if (data.betterwareCatalog) {
+          setBetterwareCatalog(data.betterwareCatalog);
+        }
+        if (Array.isArray(data.promotions) && data.promotions.length > 0) {
+          setPromotions(data.promotions);
         }
         if (data.adminStatus) {
           setAdminStatus(data.adminStatus);
@@ -173,45 +350,34 @@ export default function App() {
         console.error('Error loading local catalog:', err);
       }
 
-      // Prioritize reading products from Supabase when configured; fall back to local server / initialCatalog only if unavailable
+      // Prioritize reading products & promotions from Supabase when configured; fall back to local server / initialCatalog only if unavailable
       if (isSupabaseConfigured) {
-        const sbProducts = await fetchProductsFromSupabase();
+        const [sbProducts, sbPromos] = await Promise.all([
+          fetchProductsFromSupabase(),
+          fetchPromotionsFromSupabase(),
+        ]);
         if (sbProducts && sbProducts.length > 0) {
-          const initialByClave = new Map<string, Product>(
-            INITIAL_CATALOG_DATA.products.map((p) => [p.clave, p])
-          );
-          const serverByClave = new Map<string, Product>(
-            (localServerCatalog?.products || INITIAL_CATALOG_DATA.products).map((p) => [
-              p.clave,
-              p,
-            ])
-          );
-
-          const mergedProducts: Product[] = sbProducts.map((sbProd) => {
-            const seedProd = initialByClave.get(sbProd.clave);
-            const serverProd = serverByClave.get(sbProd.clave);
-
-            return {
-              ...sbProd,
-              id: serverProd?.id || seedProd?.id || sbProd.id,
-              featured: serverProd?.featured ?? seedProd?.featured ?? sbProd.featured,
-              priceTagStyle:
-                serverProd?.priceTagStyle ||
-                seedProd?.priceTagStyle ||
-                sbProd.priceTagStyle ||
-                'blue',
-            };
+          applySupabaseProducts(sbProducts, localServerCatalog?.products);
+        }
+        if (sbPromos && sbPromos.length > 0) {
+          setPromotions((prevPromos) => {
+            const basePromos = prevPromos && prevPromos.length > 0 ? prevPromos : INITIAL_PROMOTIONS;
+            const byClave = new Map(sbPromos.map((p) => [p.clave.toUpperCase(), p]));
+            return basePromos.map((existing) => {
+              const override = byClave.get(existing.clave.toUpperCase());
+              return override ? { ...existing, ...override, id: existing.id } : existing;
+            });
           });
-
-          setCatalog((prev) => ({
-            ...prev,
-            products: mergedProducts,
-          }));
         }
       }
     }
 
     loadInitialCatalog();
+
+    // Subscribe to Supabase Realtime (postgres_changes on public.products)
+    const unsubscribeRealtime = subscribeToProductChanges((refreshedProducts) => {
+      applySupabaseProducts(refreshedProducts);
+    });
 
     const eventSource = new EventSource(`/api/events?clientId=${encodeURIComponent(clientId)}`);
 
@@ -221,6 +387,26 @@ export default function App() {
         setCatalog(updatedCatalog);
       } catch (err) {
         console.error('Error parsing catalog update:', err);
+      }
+    });
+
+    eventSource.addEventListener('betterware:updated', (event) => {
+      try {
+        const updatedBwCatalog = JSON.parse((event as MessageEvent).data) as CatalogData;
+        setBetterwareCatalog(updatedBwCatalog);
+      } catch (err) {
+        console.error('Error parsing Betterware catalog update:', err);
+      }
+    });
+
+    eventSource.addEventListener('promotions:updated', (event) => {
+      try {
+        const updatedPromotions = JSON.parse((event as MessageEvent).data) as PromotionItem[];
+        if (Array.isArray(updatedPromotions)) {
+          setPromotions(updatedPromotions);
+        }
+      } catch (err) {
+        console.error('Error parsing promotions update:', err);
       }
     });
 
@@ -238,6 +424,8 @@ export default function App() {
     });
 
     return () => {
+      isMounted = false;
+      unsubscribeRealtime();
       eventSource.close();
     };
   }, []);
@@ -427,7 +615,10 @@ export default function App() {
 
   const handleSaveProduct = async (productId: string, updates: Partial<Product>) => {
     setSupabaseWarning('');
-    const existing = catalog.products.find((p) => p.id === productId);
+    const existing =
+      catalog.products.find((p) => p.id === productId) ||
+      betterwareCatalog.products.find((p) => p.id === productId);
+    const isBw = existing?.brand === 'betterware' || updates.brand === 'betterware';
 
     // CASE A: Active Supabase Auth session -> Persist exclusively in Supabase (public.products)
     if (isSupabaseConfigured && hasSupabaseSessionRef.current) {
@@ -446,14 +637,34 @@ export default function App() {
           ...(savedInSb || productToSync),
           id: existing.id,
           featured: existing.featured,
-          priceTagStyle: existing.priceTagStyle || 'blue',
+          priceTagStyle: existing.priceTagStyle || (isBw ? 'rose' : 'blue'),
         };
 
-        setCatalog((prev) => ({
-          ...prev,
-          lastUpdated: new Date().toISOString(),
-          products: prev.products.map((p) => (p.id === productId ? updatedProduct : p)),
-        }));
+        if (isBw) {
+          setBetterwareCatalog((prev) => ({
+            ...prev,
+            lastUpdated: new Date().toISOString(),
+            products: prev.products.map((p) => (p.id === productId ? updatedProduct : p)),
+          }));
+        } else {
+          setCatalog((prev) => ({
+            ...prev,
+            lastUpdated: new Date().toISOString(),
+            products: prev.products.map((p) => (p.id === productId ? updatedProduct : p)),
+          }));
+        }
+
+        // Also mirror update to Express backend so local server JSON & SSE clients stay in sync
+        if (adminTokenRef.current) {
+          void fetch(`/api/admin/products/${encodeURIComponent(productId)}`, {
+            method: 'PUT',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminTokenRef.current}`,
+            },
+            body: JSON.stringify({ ...updatedProduct, brand: isBw ? 'betterware' : 'shelo' }),
+          }).catch(() => {});
+        }
         return;
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -461,26 +672,38 @@ export default function App() {
       }
     }
 
-    // CASE B: No Supabase Auth session -> Fallback to Express/SSE server with non-blocking warning
-    const res = await fetch(`/api/admin/products/${productId}`, {
+    // CASE B: No Supabase Auth session -> Update via Express/SSE server (supports both Sheló & Betterware)
+    const res = await fetch(`/api/admin/products/${encodeURIComponent(productId)}`, {
       method: 'PUT',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${adminTokenRef.current}`,
       },
-      body: JSON.stringify(updates),
+      body: JSON.stringify({
+        ...updates,
+        clave: updates.clave ?? existing?.clave,
+        brand: isBw ? 'betterware' : 'shelo',
+      }),
     });
     const data = await res.json();
     let finalProduct: Product | undefined = data?.product;
 
-    if (res.ok && data.catalog) {
-      setCatalog(data.catalog);
+    if (res.ok) {
+      if (data.catalog) setCatalog(data.catalog);
+      if (data.betterwareCatalog) setBetterwareCatalog(data.betterwareCatalog);
     } else if (existing) {
       finalProduct = { ...existing, ...updates };
-      setCatalog((prev) => ({
-        ...prev,
-        products: prev.products.map((p) => (p.id === productId ? finalProduct! : p)),
-      }));
+      if (isBw) {
+        setBetterwareCatalog((prev) => ({
+          ...prev,
+          products: prev.products.map((p) => (p.id === productId ? finalProduct! : p)),
+        }));
+      } else {
+        setCatalog((prev) => ({
+          ...prev,
+          products: prev.products.map((p) => (p.id === productId ? finalProduct! : p)),
+        }));
+      }
     }
 
     if (isSupabaseConfigured && (finalProduct || existing)) {
@@ -499,24 +722,34 @@ export default function App() {
 
   const handleCreateProduct = async (newProd: Partial<Product>) => {
     setSupabaseWarning('');
+    const isBw = newProd.brand === 'betterware';
 
     // CASE A: Active Supabase Auth session -> Create exclusively in Supabase (public.products)
     if (isSupabaseConfigured && hasSupabaseSessionRef.current) {
-      const cleanClave = String(newProd.clave || 'SN2026').trim();
+      const cleanClave = String(newProd.clave || (isBw ? '26999' : 'SN2026')).trim();
       const productToCreate: Product = {
-        id: `prod-${cleanClave.toLowerCase()}`,
+        id: isBw ? `bw-${cleanClave.toLowerCase()}` : `prod-${cleanClave.toLowerCase()}`,
         clave: cleanClave,
-        name: String(newProd.name || 'Nuevo Producto Sheló NABEL').trim(),
-        subtitle: String(newProd.subtitle || 'Calidad Natural Sheló NABEL').trim(),
-        presentation: String(newProd.presentation || '250 ml').trim(),
+        name: String(
+          newProd.name || (isBw ? 'Nuevo Producto Betterware' : 'Nuevo Producto Sheló NABEL')
+        ).trim(),
+        subtitle: String(
+          newProd.subtitle || (isBw ? 'Soluciones Prácticas para tu Hogar' : 'Calidad Natural Sheló NABEL')
+        ).trim(),
+        presentation: String(newProd.presentation || (isBw ? '1 pza' : '250 ml')).trim(),
         price: Number(newProd.price) || 199,
         categoryId: String(
-          newProd.categoryId || catalog.categories[0]?.id || 'lo-nuevo-en-casa'
+          newProd.categoryId ||
+            (isBw ? betterwareCatalog.categories[0]?.id : catalog.categories[0]?.id) ||
+            'lo-nuevo-en-casa'
         ).trim(),
         catalogPage: String(newProd.catalogPage || '01').trim(),
         description: String(newProd.description || '').trim(),
-        imageUrl: String(newProd.imageUrl || '/assets/catalog/page_003.jpg').trim(),
-        priceTagStyle: newProd.priceTagStyle || 'blue',
+        imageUrl: String(
+          newProd.imageUrl || (isBw ? '/assets/betterware/page_001.jpg' : '/assets/catalog/page_003.jpg')
+        ).trim(),
+        brand: isBw ? 'betterware' : 'shelo',
+        priceTagStyle: isBw ? 'rose' : 'blue',
       };
 
       try {
@@ -528,21 +761,47 @@ export default function App() {
 
         const finalProduct: Product = {
           ...(createdInSb || productToCreate),
-          priceTagStyle: productToCreate.priceTagStyle || 'blue',
+          priceTagStyle: productToCreate.priceTagStyle || (isBw ? 'rose' : 'blue'),
         };
 
-        setCatalog((prev) => {
-          const existingIdx = prev.products.findIndex((p) => p.clave === finalProduct.clave);
-          const nextProducts =
-            existingIdx >= 0
-              ? prev.products.map((p, idx) => (idx === existingIdx ? finalProduct : p))
-              : [...prev.products, finalProduct];
-          return {
-            ...prev,
-            lastUpdated: new Date().toISOString(),
-            products: nextProducts,
-          };
-        });
+        if (isBw) {
+          setBetterwareCatalog((prev) => {
+            const existingIdx = prev.products.findIndex((p) => p.clave === finalProduct.clave);
+            const nextProducts =
+              existingIdx >= 0
+                ? prev.products.map((p, idx) => (idx === existingIdx ? finalProduct : p))
+                : [...prev.products, finalProduct];
+            return {
+              ...prev,
+              lastUpdated: new Date().toISOString(),
+              products: nextProducts,
+            };
+          });
+        } else {
+          setCatalog((prev) => {
+            const existingIdx = prev.products.findIndex((p) => p.clave === finalProduct.clave);
+            const nextProducts =
+              existingIdx >= 0
+                ? prev.products.map((p, idx) => (idx === existingIdx ? finalProduct : p))
+                : [...prev.products, finalProduct];
+            return {
+              ...prev,
+              lastUpdated: new Date().toISOString(),
+              products: nextProducts,
+            };
+          });
+        }
+        // Also mirror creation to Express backend so local server JSON & SSE clients stay in sync
+        if (adminTokenRef.current) {
+          void fetch('/api/admin/products', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${adminTokenRef.current}`,
+            },
+            body: JSON.stringify(finalProduct),
+          }).catch(() => {});
+        }
         return;
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -550,7 +809,7 @@ export default function App() {
       }
     }
 
-    // CASE B: No Supabase Auth session -> Fallback to Express/SSE server with non-blocking warning
+    // CASE B: No Supabase Auth session -> Express/SSE server (supports both Sheló & Betterware)
     const res = await fetch('/api/admin/products', {
       method: 'POST',
       headers: {
@@ -560,8 +819,9 @@ export default function App() {
       body: JSON.stringify(newProd),
     });
     const data = await res.json();
-    if (res.ok && data.catalog) {
-      setCatalog(data.catalog);
+    if (res.ok) {
+      if (data.catalog) setCatalog(data.catalog);
+      if (data.betterwareCatalog) setBetterwareCatalog(data.betterwareCatalog);
     }
 
     if (isSupabaseConfigured && data?.product) {
@@ -579,20 +839,43 @@ export default function App() {
 
   const handleDeleteProduct = async (productId: string) => {
     setSupabaseWarning('');
-    const targetProduct = catalog.products.find((p) => p.id === productId);
+    const targetProduct =
+      catalog.products.find((p) => p.id === productId) ||
+      betterwareCatalog.products.find((p) => p.id === productId);
+    const isBw = targetProduct?.brand === 'betterware';
+    const claveQuery = targetProduct?.clave
+      ? `?clave=${encodeURIComponent(targetProduct.clave)}`
+      : '';
 
-    // CASE A: Active Supabase Auth session -> Delete exclusively from Supabase (public.products)
+    // CASE A: Active Supabase Auth session -> Delete from Supabase (public.products) & mirror to Express
     if (isSupabaseConfigured && hasSupabaseSessionRef.current) {
       if (!targetProduct) {
         throw new Error('No se encontró el producto a eliminar.');
       }
       try {
         await deleteProductFromSupabase(targetProduct);
-        setCatalog((prev) => ({
-          ...prev,
-          lastUpdated: new Date().toISOString(),
-          products: prev.products.filter((p) => p.id !== productId),
-        }));
+        if (isBw) {
+          setBetterwareCatalog((prev) => ({
+            ...prev,
+            lastUpdated: new Date().toISOString(),
+            products: prev.products.filter((p) => p.id !== productId),
+          }));
+        } else {
+          setCatalog((prev) => ({
+            ...prev,
+            lastUpdated: new Date().toISOString(),
+            products: prev.products.filter((p) => p.id !== productId),
+          }));
+        }
+
+        if (adminTokenRef.current) {
+          void fetch(`/api/admin/products/${encodeURIComponent(productId)}${claveQuery}`, {
+            method: 'DELETE',
+            headers: {
+              Authorization: `Bearer ${adminTokenRef.current}`,
+            },
+          }).catch(() => {});
+        }
         return;
       } catch (err) {
         const detail = err instanceof Error ? err.message : String(err);
@@ -600,16 +883,22 @@ export default function App() {
       }
     }
 
-    // CASE B: No Supabase Auth session -> Fallback to Express/SSE server with non-blocking warning
-    const res = await fetch(`/api/admin/products/${productId}`, {
+    // CASE B: No Supabase Auth session -> Express server (supports both Sheló & Betterware)
+    const res = await fetch(`/api/admin/products/${encodeURIComponent(productId)}${claveQuery}`, {
       method: 'DELETE',
       headers: {
         Authorization: `Bearer ${adminTokenRef.current}`,
       },
     });
     const data = await res.json();
-    if (res.ok && data.catalog) {
-      setCatalog(data.catalog);
+    if (res.ok) {
+      if (data.catalog) setCatalog(data.catalog);
+      if (data.betterwareCatalog) setBetterwareCatalog(data.betterwareCatalog);
+    } else if (isBw) {
+      setBetterwareCatalog((prev) => ({
+        ...prev,
+        products: prev.products.filter((p) => p.id !== productId),
+      }));
     } else {
       setCatalog((prev) => ({
         ...prev,
@@ -639,23 +928,98 @@ export default function App() {
       body: JSON.stringify(updates),
     });
     const data = await res.json();
-    if (res.ok && data.catalog) {
-      setCatalog(data.catalog);
+    if (res.ok) {
+      if (data.catalog) setCatalog(data.catalog);
+      if (data.betterwareCatalog) setBetterwareCatalog(data.betterwareCatalog);
+    }
+
+    if (isSupabaseConfigured && hasSupabaseSessionRef.current) {
+      const allCats = [...catalog.categories, ...betterwareCatalog.categories];
+      const existingCat = allCats.find((c) => c.id === categoryId);
+      if (existingCat) {
+        await upsertCategoryToSupabase(
+          { ...existingCat, ...updates },
+          categoryId.startsWith('bw-') ? 'betterware' : 'shelo'
+        );
+      }
     }
   };
+
+  const handleSavePromotion = async (promoId: string, updates: Partial<PromotionItem>) => {
+    setSupabaseWarning('');
+    const existingPromo =
+      promotions.find((p) => p.id === promoId || p.clave === promoId) || INITIAL_PROMOTIONS[0];
+    const mergedPromo: PromotionItem = {
+      ...existingPromo,
+      ...updates,
+      id: existingPromo.id,
+      clave: existingPromo.clave,
+    };
+
+    // CASE A: Authenticated Supabase session -> persist in public.products + sync local server
+    if (isSupabaseConfigured && hasSupabaseSessionRef.current) {
+      const asProduct = promotionToProduct(mergedPromo);
+      const savedProd = await upsertProductToSupabase(asProduct);
+      const converted = savedProd ? productToPromotion(savedProd) : mergedPromo;
+      setPromotions((prev) =>
+        prev.map((p) => (p.id === existingPromo.id ? { ...mergedPromo, ...converted, id: existingPromo.id } : p))
+      );
+
+      fetch(`/api/admin/promotions/${encodeURIComponent(existingPromo.id)}`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${adminTokenRef.current}`,
+        },
+        body: JSON.stringify(mergedPromo),
+      }).catch(() => {});
+      return;
+    }
+
+    // CASE B: Local Express server persistence + SSE broadcast
+    const res = await fetch(`/api/admin/promotions/${encodeURIComponent(existingPromo.id)}`, {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${adminTokenRef.current}`,
+      },
+      body: JSON.stringify(updates),
+    });
+    const data = await res.json();
+    if (res.ok && Array.isArray(data.promotions)) {
+      setPromotions(data.promotions);
+    } else {
+      setPromotions((prev) =>
+        prev.map((p) => (p.id === existingPromo.id ? mergedPromo : p))
+      );
+    }
+
+    if (isSupabaseConfigured) {
+      try {
+        await upsertProductToSupabase(promotionToProduct(mergedPromo));
+      } catch (err) {
+        console.warn('Fallo controlado guardando promoción en Supabase:', err);
+        setSupabaseWarning(
+          'Sin sesión de Supabase Auth activa; la promoción se guardó en el servidor actual.'
+        );
+      }
+    }
+  };
+
+  const currentCatalog = activeBrand === 'betterware' ? betterwareCatalog : catalog;
 
   // Computed Product Counts & Filtered Products
   const productCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const c of catalog.categories) counts[c.id] = 0;
-    for (const p of catalog.products) {
+    for (const c of currentCatalog.categories) counts[c.id] = 0;
+    for (const p of currentCatalog.products) {
       counts[p.categoryId] = (counts[p.categoryId] || 0) + 1;
     }
     return counts;
-  }, [catalog.categories, catalog.products]);
+  }, [currentCatalog.categories, currentCatalog.products]);
 
   const filteredProducts = useMemo(() => {
-    return catalog.products.filter((p) => {
+    return currentCatalog.products.filter((p) => {
       const matchesCategory = !selectedCategoryId || p.categoryId === selectedCategoryId;
       const q = searchQuery.trim().toLowerCase();
       const matchesSearch =
@@ -666,13 +1030,15 @@ export default function App() {
         p.description.toLowerCase().includes(q);
       return matchesCategory && matchesSearch;
     });
-  }, [catalog.products, selectedCategoryId, searchQuery]);
+  }, [currentCatalog.products, selectedCategoryId, searchQuery]);
 
   const categoriesMap = useMemo(() => {
     const map: Record<string, Category> = {};
-    for (const c of catalog.categories) map[c.id] = c;
+    for (const c of [...catalog.categories, ...betterwareCatalog.categories]) {
+      map[c.id] = c;
+    }
     return map;
-  }, [catalog.categories]);
+  }, [catalog.categories, betterwareCatalog.categories]);
 
   const cartTotalItems = cart.reduce((acc, item) => acc + item.quantity, 0);
   const cartTotalAmount = cart.reduce(
@@ -686,22 +1052,42 @@ export default function App() {
     <div className="min-h-screen flex flex-col bg-[#F8FAFC] text-slate-900">
       {/* Strict 3-Zone Top Bar Contract */}
       <header className="sticky top-0 z-30 bg-white/95 backdrop-blur-md border-b border-slate-200 px-4 sm:px-8 py-3.5 flex items-center justify-between gap-8">
-        {/* Zone 1: Single text element Brand Wordmark */}
-        <a
-          href="#inicio"
-          className="text-xl sm:text-2xl font-bold tracking-tight text-sky-900 whitespace-nowrap shrink-0"
-          style={{ fontFamily: 'var(--font-display)' }}
-        >
-          Sheló NABEL
-        </a>
+        {/* Zone 1: Brand Wordmark */}
+        <div className="flex items-center gap-3">
+          <a
+            href="#inicio"
+            className="text-xl sm:text-2xl font-bold tracking-tight text-sky-900 whitespace-nowrap shrink-0"
+            style={{ fontFamily: 'var(--font-display)' }}
+          >
+            {activeBrand === 'betterware'
+              ? 'Betterware'
+              : activeBrand === 'promociones'
+              ? 'Promociones Sheló NABEL'
+              : 'Sheló NABEL'}
+          </a>
+          <span className="hidden sm:inline-block px-2 py-0.5 rounded-md bg-slate-100 text-slate-600 text-[11px] font-semibold uppercase tracking-wider">
+            {activeBrand === 'betterware'
+              ? 'Noviembre 2026'
+              : activeBrand === 'promociones'
+              ? 'Afiliación y Membresía'
+              : 'Edición 2026'}
+          </span>
+        </div>
 
-        {/* Zone 2: 4 Concise Single-Line Navigation Links */}
-        <nav className="hidden md:flex items-center gap-7 text-sm font-medium text-slate-600">
+        {/* Zone 2: Concise Single-Line Navigation Links */}
+        <nav className="hidden md:flex items-center gap-6 text-sm font-medium text-slate-600">
           <a
             href="#inicio"
             className="hover:text-sky-800 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0"
           >
             Inicio
+          </a>
+          <a
+            href="#apartado-promociones"
+            onClick={() => setActiveBrand('promociones')}
+            className="hover:text-sky-800 hover:underline underline-offset-4 transition-colors whitespace-nowrap shrink-0 font-semibold text-sky-700"
+          >
+            Promociones
           </a>
           <a
             href="#indice-catalogo"
@@ -741,180 +1127,487 @@ export default function App() {
         </div>
       </header>
 
-      {/* Main Content */}
-      <main className="flex-1">
-        {/* HERO SECTION featuring the LARGE WA0029 Logo */}
-        <section
-          id="inicio"
-          className="relative overflow-hidden bg-gradient-to-b from-sky-50/90 via-white to-[#F8FAFC] border-b border-slate-200/80 pt-8 pb-14 px-4 sm:px-6 lg:px-8"
-        >
-          <div className="max-w-[1360px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
-            {/* Left Column: Large Prominent Logo WA0029 */}
-            <div className="lg:col-span-5 flex flex-col items-center justify-center">
-              <div className="relative p-3 sm:p-4 rounded-full bg-white shadow-xl border-2 border-sky-200/90">
-                <img
-                  src="/assets/aistudio/IMG-20261020-WA0029_de2a322f.jpg"
-                  alt="Logo Oficial Sheló NABEL — Belleza, naturaleza y bienestar — Yesenia Jiménez"
-                  className="w-64 h-64 sm:w-80 sm:h-80 lg:w-[370px] lg:h-[370px] rounded-full object-contain"
-                />
-              </div>
-            </div>
-
-            {/* Right Column: Editorial Presentation & Interactive Actions */}
-            <div className="lg:col-span-7 text-center lg:text-left space-y-6">
-              <div className="flex flex-wrap items-center justify-center lg:justify-start gap-2 text-xs font-semibold text-sky-800">
-                <span>Productos de Belleza</span>
-                <span aria-hidden="true">·</span>
-                <span>Productos Naturales</span>
-                <span aria-hidden="true">·</span>
-                <span>Cuidado Personal</span>
-                <span aria-hidden="true">·</span>
-                <span>Catálogo Oficial 2026</span>
-              </div>
-
-              <h1
-                className="text-4xl sm:text-5xl lg:text-6xl font-bold text-slate-900 tracking-tight leading-[1.08]"
-                style={{ fontFamily: 'var(--font-display)', textWrap: 'balance' }}
+      {/* Brand Switcher Bar & Dual PDF Downloads */}
+      <div className="bg-slate-100/95 border-b border-slate-200 py-3 px-4 sm:px-8">
+        <div className="max-w-[1360px] mx-auto flex flex-col md:flex-row items-center justify-between gap-3">
+          {/* Brand Switcher Tabs */}
+          <div className="flex items-center gap-2 flex-wrap justify-center md:justify-start">
+            <span className="text-xs font-bold uppercase tracking-wider text-slate-600 mr-1">
+              Apartado:
+            </span>
+            <div className="inline-flex flex-wrap rounded-xl p-1 bg-slate-200/90 shadow-2xs gap-1">
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveBrand('shelo');
+                  setSelectedCategoryId(null);
+                  setSearchQuery('');
+                }}
+                className={`px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all flex items-center gap-2 ${
+                  activeBrand === 'shelo'
+                    ? 'bg-sky-700 text-white shadow-xs'
+                    : 'text-slate-700 hover:text-slate-900'
+                }`}
               >
-                Sheló NABEL: Belleza, Naturaleza y Bienestar para Ti
-              </h1>
-
-              <p className="text-base sm:text-lg text-slate-600 max-w-2xl mx-auto lg:mx-0 leading-relaxed">
-                Explora el catálogo interactivo completo estructurado por categorías. Agrega tus productos favoritos al carrito de compras y coordina tu pago por transferencia bancaria directamente por WhatsApp con{' '}
-                <strong className="text-slate-900">Yesenia Jiménez</strong> en Hermosillo, Sonora.
-              </p>
-
-              {/* Primary Hero CTAs */}
-              <div className="flex flex-wrap items-center justify-center lg:justify-start gap-3.5 pt-2">
-                <a
-                  href="#indice-catalogo"
-                  className="px-6 py-3.5 rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-sm font-semibold shadow-sm transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
-                >
-                  <Sparkles className="w-4 h-4" />
-                  <span>Explorar Menú del Catálogo</span>
-                </a>
-
-                <button
-                  type="button"
-                  onClick={() => setIsCartOpen(true)}
-                  className="px-5 py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold shadow-sm transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
-                >
-                  <MessageCircle className="w-4 h-4" />
-                  <span>Ver Carrito y Pedir por WhatsApp</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPdfStartPage(1);
-                    setShowFullPdfModal(true);
-                  }}
-                  className="px-5 py-3.5 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
-                >
-                  <BookOpen className="w-4 h-4 text-sky-700" />
-                  <span>Ver / Descargar Catálogo (148 Págs)</span>
-                </button>
-              </div>
-
-              {/* Multi-User & Admin Access Toolbar Strip */}
-              <div className="pt-4 border-t border-slate-200/80 flex flex-wrap items-center justify-center lg:justify-between gap-4 text-xs text-slate-600">
-                <div className="flex flex-wrap items-center gap-3">
-                  <span className="flex items-center gap-1.5 font-medium text-slate-700">
-                    <MapPin className="w-3.5 h-3.5 text-sky-700" />
-                    <span>Yesenia Jiménez · Hermosillo, Sonora</span>
-                  </span>
-                  <span aria-hidden="true">·</span>
-                  <a
-                    href="https://wa.me/526321037155"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    className="flex items-center gap-1 font-mono-num font-semibold text-emerald-700 hover:underline"
-                  >
-                    <Phone className="w-3.5 h-3.5" />
-                    <span>+52 632 103 7155</span>
-                  </a>
-                  <span aria-hidden="true">·</span>
-                  <span className="flex items-center gap-1 font-mono-num text-slate-500">
-                    <Users className="w-3.5 h-3.5 text-sky-600" />
-                    <span>
-                      {adminStatus.activeUsersCount}{' '}
-                      {adminStatus.activeUsersCount === 1
-                        ? 'usuario en línea'
-                        : 'usuarios en línea'}
-                    </span>
-                  </span>
-                  <span aria-hidden="true">·</span>
-                  <span
-                    className="flex items-center gap-1.5 font-medium text-sky-800"
-                    title={`Modo adaptado automáticamente: ${deviceInfo.environmentLabel} · Resolución ${deviceInfo.viewportWidth}x${deviceInfo.viewportHeight} (${deviceInfo.orientation})`}
-                  >
-                    {deviceInfo.machineCategory === 'mobile' ? (
-                      <Smartphone className="w-3.5 h-3.5 text-sky-700" />
-                    ) : deviceInfo.machineCategory === 'tablet' ? (
-                      <Tablet className="w-3.5 h-3.5 text-sky-700" />
-                    ) : deviceInfo.machineCategory === 'laptop' ? (
-                      <Laptop className="w-3.5 h-3.5 text-sky-700" />
-                    ) : (
-                      <Monitor className="w-3.5 h-3.5 text-sky-700" />
-                    )}
-                    <span>
-                      Detectado: <strong>{deviceInfo.machineLabel}</strong> ({deviceInfo.os} · {deviceInfo.browser})
-                    </span>
-                  </span>
-                </div>
-
-                {/* Admin Access Button respecting Single-Session Lock */}
-                <div>
-                  {isAdmin ? (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingProduct(null);
-                        setEditingCategory(null);
-                        setIsAdminModalOpen(true);
-                      }}
-                      className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-2 shadow-xs transition-colors"
-                    >
-                      <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                      <span>Panel Administrativo Activo (Editar Precios / Imágenes)</span>
-                    </button>
-                  ) : adminStatus.isAdminConnected ? (
-                    <button
-                      type="button"
-                      onClick={() => setIsAdminModalOpen(true)}
-                      className="px-3.5 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 text-xs font-semibold flex items-center gap-2 transition-colors"
-                      title="El administrador está conectado actualmente; el acceso a la clave está bloqueado para otros usuarios"
-                    >
-                      <Lock className="w-3.5 h-3.5 text-amber-700" />
-                      <span>Administrador en Sesión (Clave Bloqueada)</span>
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setEditingProduct(null);
-                        setEditingCategory(null);
-                        setIsAdminModalOpen(true);
-                      }}
-                      className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-2 transition-colors"
-                    >
-                      <Lock className="w-3.5 h-3.5 text-slate-600" />
-                      <span>Panel Administrativo (****)</span>
-                    </button>
-                  )}
-                </div>
-              </div>
+                <span>🌿 Sheló NABEL ({catalog.products.length} Productos)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveBrand('betterware');
+                  setSelectedCategoryId(null);
+                  setSearchQuery('');
+                }}
+                className={`px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all flex items-center gap-2 ${
+                  activeBrand === 'betterware'
+                    ? 'bg-amber-600 text-white shadow-xs'
+                    : 'text-slate-700 hover:text-slate-900'
+                }`}
+              >
+                <span>🏠 Betterware Noviembre 2026 ({betterwareCatalog.products.length} Productos)</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setActiveBrand('promociones');
+                }}
+                className={`px-4 py-2 rounded-lg text-xs sm:text-sm font-bold transition-all flex items-center gap-2 ${
+                  activeBrand === 'promociones'
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'text-slate-700 hover:text-slate-900'
+                }`}
+              >
+                <span>✨ Promociones ({promotions.length})</span>
+              </button>
             </div>
           </div>
-        </section>
+
+          {/* Dual PDF Direct Download Links */}
+          <div className="flex items-center gap-2 flex-wrap justify-center md:justify-end">
+            <span className="text-xs font-semibold text-slate-500 hidden lg:inline">
+              Descargar Catálogos:
+            </span>
+            <a
+              href="/api/catalog/pdf"
+              download="Catalogo_Shelo_NABEL_2026.pdf"
+              className="px-3.5 py-1.5 rounded-lg bg-white border border-slate-300 text-xs font-semibold text-slate-800 hover:bg-slate-50 flex items-center gap-1.5 transition-colors shadow-2xs"
+              title="Descargar Catálogo Oficial Sheló NABEL 2026 (PDF · 148 páginas)"
+            >
+              <Download className="w-3.5 h-3.5 text-sky-700" />
+              <span>PDF Sheló NABEL (148 págs)</span>
+            </a>
+            <a
+              href="/api/catalog/betterware/pdf"
+              download="Catalogo_Betterware_Noviembre_2026.pdf"
+              className="px-3.5 py-1.5 rounded-lg bg-white border border-slate-300 text-xs font-semibold text-slate-800 hover:bg-slate-50 flex items-center gap-1.5 transition-colors shadow-2xs"
+              title="Descargar Catálogo Oficial Betterware Noviembre 2026 (PDF · 118 páginas)"
+            >
+              <Download className="w-3.5 h-3.5 text-amber-600" />
+              <span>PDF Betterware (118 págs)</span>
+            </a>
+          </div>
+        </div>
+      </div>
+
+      {/* Main Content */}
+      <main className="flex-1">
+        {/* When activeBrand === 'promociones', show the Extra-Large Promotions Section right at the top */}
+        {activeBrand === 'promociones' && (
+          <PromotionsSection
+            promotions={promotions}
+            isAdmin={isAdmin}
+            whatsappNumber={catalog.whatsappNumber}
+            onSavePromotion={handleSavePromotion}
+            onUploadFile={handleUploadFile}
+            onOpenAdminPromotionsTab={(promo) => {
+              setEditingProduct(null);
+              setEditingCategory(null);
+              setEditingPromotion(promo || promotions[0] || null);
+              setIsAdminModalOpen(true);
+            }}
+          />
+        )}
+
+        {/* HERO SECTION: Dynamic according to selected Brand */}
+        {activeBrand === 'betterware' ? (
+          <section
+            id="inicio"
+            className="relative overflow-hidden bg-gradient-to-b from-amber-50/80 via-white to-[#F8FAFC] border-b border-slate-200/80 pt-8 pb-14 px-4 sm:px-6 lg:px-8"
+          >
+            <div className="max-w-[1360px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
+              {/* Left Column: High-Res Betterware Cover Page 001 */}
+              <div className="lg:col-span-5 flex flex-col items-center justify-center">
+                <div className="relative p-2 rounded-2xl bg-white shadow-xl border-2 border-amber-200/90 max-w-xs sm:max-w-sm">
+                  <img
+                    src="/assets/betterware/page_001.jpg"
+                    alt="Catálogo Oficial Betterware Noviembre 2026 — Edición Navidad y Hogar — Yesenia Jiménez"
+                    className="w-full h-auto rounded-xl object-contain shadow-xs"
+                    onError={(e) => {
+                      e.currentTarget.src = '/assets/aistudio/IMG-20261020-WA0029_de2a322f.jpg';
+                    }}
+                  />
+                  <div className="absolute -bottom-3 -right-3 bg-amber-600 text-white font-bold text-xs px-3 py-1.5 rounded-xl shadow-md">
+                    118 Páginas Oficiales
+                  </div>
+                </div>
+              </div>
+
+              {/* Right Column: Betterware Editorial Presentation & Interactive Actions */}
+              <div className="lg:col-span-7 text-center lg:text-left space-y-6">
+                <div className="flex flex-wrap items-center justify-center lg:justify-start gap-2 text-xs font-semibold text-amber-800">
+                  <span>Soluciones para el Hogar</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Cocina y Organización</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Navidad & Novedades</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Catálogo Noviembre 2026</span>
+                </div>
+
+                <h1
+                  className="text-4xl sm:text-5xl lg:text-6xl font-bold text-slate-900 tracking-tight leading-[1.08]"
+                  style={{ fontFamily: 'var(--font-display)', textWrap: 'balance' }}
+                >
+                  Betterware: Soluciones Prácticas para tu Hogar y Familia
+                </h1>
+
+                <p className="text-base sm:text-lg text-slate-600 max-w-2xl mx-auto lg:mx-0 leading-relaxed">
+                  Explora el catálogo oficial de Noviembre 2026 estructurado en {betterwareCatalog.categories.length} categorías con {betterwareCatalog.products.length} productos detallados: Árbol Fiestas Navideñas, dispensador Vitrolux, charolas de chef, muebles modulares, freidoras, recámara, bienestar y Better Locura. Agrega tus favoritos al carrito y coordina tu pedido por transferencia con{' '}
+                  <strong className="text-slate-900">Yesenia Jiménez</strong> en Hermosillo, Sonora.
+                </p>
+
+                {/* Primary Hero CTAs */}
+                <div className="flex flex-wrap items-center justify-center lg:justify-start gap-3.5 pt-2">
+                  <a
+                    href="#indice-catalogo"
+                    className="px-6 py-3.5 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-sm font-semibold shadow-sm transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    <span>Explorar Categorías Betterware (11)</span>
+                  </a>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsCartOpen(true)}
+                    className="px-5 py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold shadow-sm transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
+                  >
+                    <MessageCircle className="w-4 h-4" />
+                    <span>Ver Carrito y Pedir por WhatsApp</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPdfStartPage(1);
+                      setShowFullPdfModal(true);
+                    }}
+                    className="px-5 py-3.5 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
+                  >
+                    <BookOpen className="w-4 h-4 text-amber-600" />
+                    <span>Ver Visor Betterware (118 Págs)</span>
+                  </button>
+
+                  <a
+                    href="/api/catalog/betterware/pdf"
+                    download="Catalogo_Betterware_Noviembre_2026.pdf"
+                    className="px-5 py-3.5 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-300 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
+                  >
+                    <Download className="w-4 h-4 text-amber-700" />
+                    <span>Descargar PDF Betterware</span>
+                  </a>
+                </div>
+
+                {/* Multi-User & Admin Access Toolbar Strip */}
+                <div className="pt-4 border-t border-slate-200/80 flex flex-wrap items-center justify-center lg:justify-between gap-4 text-xs text-slate-600">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                      <MapPin className="w-3.5 h-3.5 text-amber-600" />
+                      <span>Yesenia Jiménez · Hermosillo, Sonora</span>
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <a
+                      href="https://wa.me/526321037155"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1 font-mono-num font-semibold text-emerald-700 hover:underline"
+                    >
+                      <Phone className="w-3.5 h-3.5" />
+                      <span>+52 632 103 7155</span>
+                    </a>
+                    <span aria-hidden="true">·</span>
+                    <span className="flex items-center gap-1 font-mono-num text-slate-500">
+                      <Users className="w-3.5 h-3.5 text-amber-600" />
+                      <span>
+                        {adminStatus.activeUsersCount}{' '}
+                        {adminStatus.activeUsersCount === 1
+                          ? 'usuario en línea'
+                          : 'usuarios en línea'}
+                      </span>
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span
+                      className="flex items-center gap-1.5 font-medium text-amber-900"
+                      title={`Modo adaptado automáticamente: ${deviceInfo.environmentLabel} · Resolución ${deviceInfo.viewportWidth}x${deviceInfo.viewportHeight} (${deviceInfo.orientation})`}
+                    >
+                      {deviceInfo.machineCategory === 'mobile' ? (
+                        <Smartphone className="w-3.5 h-3.5 text-amber-700" />
+                      ) : deviceInfo.machineCategory === 'tablet' ? (
+                        <Tablet className="w-3.5 h-3.5 text-amber-700" />
+                      ) : deviceInfo.machineCategory === 'laptop' ? (
+                        <Laptop className="w-3.5 h-3.5 text-amber-700" />
+                      ) : (
+                        <Monitor className="w-3.5 h-3.5 text-amber-700" />
+                      )}
+                      <span>
+                        Detectado: <strong>{deviceInfo.machineLabel}</strong> ({deviceInfo.os} · {deviceInfo.browser})
+                      </span>
+                    </span>
+                  </div>
+
+                  {/* Admin Access Button */}
+                  <div>
+                    {isAdmin ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingProduct(null);
+                          setEditingCategory(null);
+                          setIsAdminModalOpen(true);
+                        }}
+                        className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-2 shadow-xs transition-colors"
+                      >
+                        <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                        <span>Panel Administrativo Activo (Editar Precios / Imágenes)</span>
+                      </button>
+                    ) : adminStatus.isAdminConnected ? (
+                      <button
+                        type="button"
+                        onClick={() => setIsAdminModalOpen(true)}
+                        className="px-3.5 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 text-xs font-semibold flex items-center gap-2 transition-colors"
+                        title="El administrador está conectado actualmente; el acceso a la clave está bloqueado para otros usuarios"
+                      >
+                        <Lock className="w-3.5 h-3.5 text-amber-700" />
+                        <span>Administrador en Sesión (Clave Bloqueada)</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingProduct(null);
+                          setEditingCategory(null);
+                          setIsAdminModalOpen(true);
+                        }}
+                        className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-2 transition-colors"
+                      >
+                        <Lock className="w-3.5 h-3.5 text-slate-600" />
+                        <span>Panel Administrativo (****)</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        ) : (
+          <section
+            id="inicio"
+            className="relative overflow-hidden bg-gradient-to-b from-sky-50/90 via-white to-[#F8FAFC] border-b border-slate-200/80 pt-8 pb-14 px-4 sm:px-6 lg:px-8"
+          >
+            <div className="max-w-[1360px] mx-auto grid grid-cols-1 lg:grid-cols-12 gap-10 lg:gap-12 items-center">
+              {/* Left Column: Large Prominent Logo WA0029 */}
+              <div className="lg:col-span-5 flex flex-col items-center justify-center">
+                <div className="relative p-3 sm:p-4 rounded-full bg-white shadow-xl border-2 border-sky-200/90">
+                  <img
+                    src="/assets/aistudio/IMG-20261020-WA0029_de2a322f.jpg"
+                    alt="Logo Oficial Sheló NABEL — Belleza, naturaleza y bienestar — Yesenia Jiménez"
+                    className="w-64 h-64 sm:w-80 sm:h-80 lg:w-[370px] lg:h-[370px] rounded-full object-contain"
+                  />
+                </div>
+              </div>
+
+              {/* Right Column: Editorial Presentation & Interactive Actions */}
+              <div className="lg:col-span-7 text-center lg:text-left space-y-6">
+                <div className="flex flex-wrap items-center justify-center lg:justify-start gap-2 text-xs font-semibold text-sky-800">
+                  <span>Productos de Belleza</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Productos Naturales</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Cuidado Personal</span>
+                  <span aria-hidden="true">·</span>
+                  <span>Catálogo Oficial 2026</span>
+                </div>
+
+                <h1
+                  className="text-4xl sm:text-5xl lg:text-6xl font-bold text-slate-900 tracking-tight leading-[1.08]"
+                  style={{ fontFamily: 'var(--font-display)', textWrap: 'balance' }}
+                >
+                  Sheló NABEL: Belleza, Naturaleza y Bienestar para Ti
+                </h1>
+
+                <p className="text-base sm:text-lg text-slate-600 max-w-2xl mx-auto lg:mx-0 leading-relaxed">
+                  Explora el catálogo interactivo completo estructurado por categorías. Agrega tus productos favoritos al carrito de compras y coordina tu pago por transferencia bancaria directamente por WhatsApp con{' '}
+                  <strong className="text-slate-900">Yesenia Jiménez</strong> en Hermosillo, Sonora.
+                </p>
+
+                {/* Primary Hero CTAs */}
+                <div className="flex flex-wrap items-center justify-center lg:justify-start gap-3.5 pt-2">
+                  <a
+                    href="#indice-catalogo"
+                    className="px-6 py-3.5 rounded-xl bg-sky-700 hover:bg-sky-800 text-white text-sm font-semibold shadow-sm transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
+                  >
+                    <Sparkles className="w-4 h-4" />
+                    <span>Explorar Categorías Sheló NABEL (13)</span>
+                  </a>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsCartOpen(true)}
+                    className="px-5 py-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-semibold shadow-sm transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
+                  >
+                    <MessageCircle className="w-4 h-4" />
+                    <span>Ver Carrito y Pedir por WhatsApp</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPdfStartPage(1);
+                      setShowFullPdfModal(true);
+                    }}
+                    className="px-5 py-3.5 rounded-xl bg-white hover:bg-slate-100 text-slate-800 border border-slate-300 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
+                  >
+                    <BookOpen className="w-4 h-4 text-sky-700" />
+                    <span>Ver Visor Sheló (148 Págs)</span>
+                  </button>
+
+                  <a
+                    href="/api/catalog/pdf"
+                    download="Catalogo_Shelo_NABEL_2026.pdf"
+                    className="px-5 py-3.5 rounded-xl bg-sky-50 hover:bg-sky-100 text-sky-900 border border-sky-300 text-sm font-semibold transition-colors whitespace-nowrap shrink-0 flex items-center gap-2"
+                  >
+                    <Download className="w-4 h-4 text-sky-700" />
+                    <span>Descargar PDF Sheló</span>
+                  </a>
+                </div>
+
+                {/* Multi-User & Admin Access Toolbar Strip */}
+                <div className="pt-4 border-t border-slate-200/80 flex flex-wrap items-center justify-center lg:justify-between gap-4 text-xs text-slate-600">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <span className="flex items-center gap-1.5 font-medium text-slate-700">
+                      <MapPin className="w-3.5 h-3.5 text-sky-700" />
+                      <span>Yesenia Jiménez · Hermosillo, Sonora</span>
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <a
+                      href="https://wa.me/526321037155"
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex items-center gap-1 font-mono-num font-semibold text-emerald-700 hover:underline"
+                    >
+                      <Phone className="w-3.5 h-3.5" />
+                      <span>+52 632 103 7155</span>
+                    </a>
+                    <span aria-hidden="true">·</span>
+                    <span className="flex items-center gap-1 font-mono-num text-slate-500">
+                      <Users className="w-3.5 h-3.5 text-sky-600" />
+                      <span>
+                        {adminStatus.activeUsersCount}{' '}
+                        {adminStatus.activeUsersCount === 1
+                          ? 'usuario en línea'
+                          : 'usuarios en línea'}
+                      </span>
+                    </span>
+                    <span aria-hidden="true">·</span>
+                    <span
+                      className="flex items-center gap-1.5 font-medium text-sky-800"
+                      title={`Modo adaptado automáticamente: ${deviceInfo.environmentLabel} · Resolución ${deviceInfo.viewportWidth}x${deviceInfo.viewportHeight} (${deviceInfo.orientation})`}
+                    >
+                      {deviceInfo.machineCategory === 'mobile' ? (
+                        <Smartphone className="w-3.5 h-3.5 text-sky-700" />
+                      ) : deviceInfo.machineCategory === 'tablet' ? (
+                        <Tablet className="w-3.5 h-3.5 text-sky-700" />
+                      ) : deviceInfo.machineCategory === 'laptop' ? (
+                        <Laptop className="w-3.5 h-3.5 text-sky-700" />
+                      ) : (
+                        <Monitor className="w-3.5 h-3.5 text-sky-700" />
+                      )}
+                      <span>
+                        Detectado: <strong>{deviceInfo.machineLabel}</strong> ({deviceInfo.os} · {deviceInfo.browser})
+                      </span>
+                    </span>
+                  </div>
+
+                  {/* Admin Access Button respecting Single-Session Lock */}
+                  <div>
+                    {isAdmin ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingProduct(null);
+                          setEditingCategory(null);
+                          setIsAdminModalOpen(true);
+                        }}
+                        className="px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 text-white text-xs font-semibold flex items-center gap-2 shadow-xs transition-colors"
+                      >
+                        <ShieldCheck className="w-4 h-4 text-emerald-400" />
+                        <span>Panel Administrativo Activo (Editar Precios / Imágenes)</span>
+                      </button>
+                    ) : adminStatus.isAdminConnected ? (
+                      <button
+                        type="button"
+                        onClick={() => setIsAdminModalOpen(true)}
+                        className="px-3.5 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 text-amber-900 border border-amber-200 text-xs font-semibold flex items-center gap-2 transition-colors"
+                        title="El administrador está conectado actualmente; el acceso a la clave está bloqueado para otros usuarios"
+                      >
+                        <Lock className="w-3.5 h-3.5 text-amber-700" />
+                        <span>Administrador en Sesión (Clave Bloqueada)</span>
+                      </button>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setEditingProduct(null);
+                          setEditingCategory(null);
+                          setIsAdminModalOpen(true);
+                        }}
+                        className="px-3.5 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-semibold flex items-center gap-2 transition-colors"
+                      >
+                        <Lock className="w-3.5 h-3.5 text-slate-600" />
+                        <span>Panel Administrativo (****)</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
+        )}
+
+        {/* Apartado de Promociones (Imágenes Grandes) enseguida de Sheló NABEL y Betterware */}
+        {activeBrand !== 'promociones' && (
+          <PromotionsSection
+            promotions={promotions}
+            isAdmin={isAdmin}
+            whatsappNumber={catalog.whatsappNumber}
+            onSavePromotion={handleSavePromotion}
+            onUploadFile={handleUploadFile}
+            onOpenAdminPromotionsTab={(promo) => {
+              setEditingProduct(null);
+              setEditingCategory(null);
+              setEditingPromotion(promo || promotions[0] || null);
+              setIsAdminModalOpen(true);
+            }}
+          />
+        )}
 
         {/* SECTION 2: Interactive Menu Structured Like WA0027 ("Índice") */}
         <CatalogIndexMenu
-          categories={catalog.categories}
+          categories={currentCatalog.categories}
           selectedCategoryId={selectedCategoryId}
           onSelectCategory={setSelectedCategoryId}
           productCounts={productCounts}
           isAdmin={isAdmin}
+          currentBrand={activeBrand === 'betterware' ? 'betterware' : 'shelo'}
           onEditCategory={(cat) => {
             setEditingCategory(cat);
             setEditingProduct(null);
@@ -936,7 +1629,11 @@ export default function App() {
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
               <div>
                 <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-sky-700">
-                  <span>Catálogo Interactivo Sheló NABEL 2026</span>
+                  <span>
+                    {activeBrand === 'betterware'
+                      ? 'Catálogo Interactivo Betterware Noviembre 2026'
+                      : 'Catálogo Interactivo Sheló NABEL 2026'}
+                  </span>
                   {activeCategory && (
                     <>
                       <span>·</span>
@@ -965,7 +1662,11 @@ export default function App() {
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="Buscar por nombre o clave (ej. S1701)..."
+                    placeholder={
+                      activeBrand === 'betterware'
+                        ? 'Buscar por nombre o clave (ej. 26625)...'
+                        : 'Buscar por nombre o clave (ej. S1701)...'
+                    }
                     className="w-full pl-10 pr-4 py-2.5 text-sm rounded-xl border border-slate-200 bg-slate-50 focus:bg-white focus:outline-none focus:ring-2 focus:ring-sky-600"
                   />
                 </div>
@@ -987,7 +1688,7 @@ export default function App() {
               </div>
             </div>
 
-            {/* Horizontal Quick Category Switcher matching WA0027 Categories */}
+            {/* Horizontal Quick Category Switcher matching categories */}
             <div className="flex items-center gap-2 overflow-x-auto pb-2 pt-1">
               <button
                 type="button"
@@ -998,10 +1699,10 @@ export default function App() {
                     : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                 }`}
               >
-                Todas las Categorías ({catalog.products.length})
+                Todas las Categorías ({currentCatalog.products.length})
               </button>
 
-              {catalog.categories.map((cat) => {
+              {currentCatalog.categories.map((cat) => {
                 const active = selectedCategoryId === cat.id;
                 return (
                   <button
@@ -1214,7 +1915,7 @@ export default function App() {
               className="w-8 h-8 rounded-full object-contain border border-slate-200"
             />
             <span>
-              © 2026 Sheló NABEL — Yesenia Jiménez | 632 103 7155 | Hermosillo, Sonora
+              © 2026 Sheló NABEL & Betterware — Yesenia Jiménez | 632 103 7155 | Hermosillo, Sonora
             </span>
             <span aria-hidden="true">·</span>
             <span className="font-mono-num text-slate-600">
@@ -1222,9 +1923,27 @@ export default function App() {
             </span>
           </div>
 
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-4 flex-wrap">
             <a href="#indice-catalogo" className="hover:text-slate-900">
               Índice
+            </a>
+            <span>·</span>
+            <a
+              href="/api/catalog/pdf"
+              download="Catalogo_Shelo_NABEL_2026.pdf"
+              className="hover:text-sky-700 flex items-center gap-1 font-medium"
+            >
+              <Download className="w-3 h-3" />
+              <span>PDF Sheló</span>
+            </a>
+            <span>·</span>
+            <a
+              href="/api/catalog/betterware/pdf"
+              download="Catalogo_Betterware_Noviembre_2026.pdf"
+              className="hover:text-amber-700 flex items-center gap-1 font-medium"
+            >
+              <Download className="w-3 h-3" />
+              <span>PDF Betterware</span>
             </a>
             <span>·</span>
             <button
@@ -1246,7 +1965,7 @@ export default function App() {
                   ? 'Administrador Activo'
                   : adminStatus.isAdminConnected
                   ? 'Admin en línea (Bloqueado)'
-                  : 'Panel Admin'}
+                  : 'Panel Admin (****)'}
               </span>
             </button>
           </div>
@@ -1298,22 +2017,28 @@ export default function App() {
         whatsappNumber={catalog.whatsappNumber}
       />
 
-      {/* Admin Login (PIN: 1990 masked as ****) & Product Image/Price Editor Modal */}
+      {/* Admin Login & Product Image/Price Editor Modal */}
       <AdminModal
         isOpen={isAdminModalOpen}
-        onClose={() => setIsAdminModalOpen(false)}
+        onClose={() => {
+          setIsAdminModalOpen(false);
+          setEditingPromotion(null);
+        }}
         isAdmin={isAdmin}
         adminStatus={adminStatus}
         onLogin={handleAdminLogin}
         onLogout={handleAdminLogout}
-        products={catalog.products}
-        categories={catalog.categories}
+        products={[...catalog.products, ...betterwareCatalog.products]}
+        categories={[...catalog.categories, ...betterwareCatalog.categories]}
+        promotions={promotions}
         initialEditProduct={editingProduct}
         initialEditCategory={editingCategory}
+        initialEditPromotion={editingPromotion}
         onSaveProduct={handleSaveProduct}
         onCreateProduct={handleCreateProduct}
         onDeleteProduct={handleDeleteProduct}
         onSaveCategory={handleSaveCategory}
+        onSavePromotion={handleSavePromotion}
         onUploadFile={handleUploadFile}
         isSupabaseConnected={isSupabaseConfigured}
         supabaseWarning={supabaseWarning}
@@ -1326,7 +2051,8 @@ export default function App() {
         product={previewProduct}
         showFullPdfModal={showFullPdfModal}
         initialPdfPage={pdfStartPage}
-        categories={catalog.categories}
+        catalogBrand={activeBrand === 'betterware' ? 'betterware' : 'shelo'}
+        categories={currentCatalog.categories}
         deviceInfo={deviceInfo}
         onClose={() => {
           setPreviewProduct(null);
@@ -1338,6 +2064,16 @@ export default function App() {
           setEditingProduct(prod);
           setEditingCategory(null);
           setIsAdminModalOpen(true);
+        }}
+        onOpenPdfAtPage={(pageNum) => {
+          if (previewProduct?.brand === 'betterware' && activeBrand !== 'betterware') {
+            setActiveBrand('betterware');
+          } else if (previewProduct?.brand === 'shelo' && activeBrand !== 'shelo') {
+            setActiveBrand('shelo');
+          }
+          setPreviewProduct(null);
+          setPdfStartPage(pageNum);
+          setShowFullPdfModal(true);
         }}
       />
     </div>

@@ -45,10 +45,16 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
   );
 
   const buildWhatsAppUrl = () => {
-    const lines: string[] = [
-      '🌿 *HOLA YESENIA - PEDIDO CATÁLOGO SHELÓ NABEL 2026* 🌿',
-      '',
-    ];
+    const hasShelo = items.some((i) => i.product.brand !== 'betterware');
+    const hasBetterware = items.some((i) => i.product.brand === 'betterware');
+    const headerTitle =
+      hasShelo && hasBetterware
+        ? '🛍️ *HOLA YESENIA - PEDIDO CATÁLOGO SHELÓ NABEL Y BETTERWARE 2026* 🛍️'
+        : hasBetterware
+        ? '🏠 *HOLA YESENIA - PEDIDO CATÁLOGO BETTERWARE NOVIEMBRE 2026* 🏠'
+        : '🌿 *HOLA YESENIA - PEDIDO CATÁLOGO SHELÓ NABEL 2026* 🌿';
+
+    const lines: string[] = [headerTitle, ''];
 
     if (customerName.trim()) {
       lines.push(`👤 *Cliente:* ${customerName.trim()}`);
@@ -61,8 +67,9 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
 
     items.forEach((item, index) => {
       const subtotal = item.product.price * item.quantity;
+      const brandTag = item.product.brand === 'betterware' ? '[Betterware]' : '[Sheló NABEL]';
       lines.push(
-        `${index + 1}. *${item.product.name}* (Clave: ${item.product.clave})`
+        `${index + 1}. ${brandTag} *${item.product.name}* (Clave: ${item.product.clave} · Pág. ${item.product.catalogPage})`
       );
       lines.push(
         `   • Cantidad: ${item.quantity} x $${item.product.price.toLocaleString('es-MX')} MXN = *$${subtotal.toLocaleString('es-MX')} MXN*`
@@ -132,7 +139,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
                   Tu carrito está vacío
                 </h3>
                 <p className="text-sm text-slate-500 mt-1 max-w-xs mx-auto">
-                  Explora el menú del catálogo Sheló NABEL y agrega tus productos favoritos para enviar tu pedido por WhatsApp.
+                  Explora los catálogos de Sheló NABEL y Betterware y agrega tus productos favoritos para enviar tu pedido por WhatsApp.
                 </p>
                 <button
                   type="button"
@@ -177,9 +184,20 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({
 
                       <div className="flex-1 min-w-0">
                         <div className="flex items-start justify-between gap-2">
-                          <h4 className="text-sm font-semibold text-slate-900 leading-snug line-clamp-2">
-                            {product.name}
-                          </h4>
+                          <div>
+                            <span
+                              className={`inline-block px-1.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider mb-1 ${
+                                product.brand === 'betterware'
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-sky-100 text-sky-800'
+                              }`}
+                            >
+                              {product.brand === 'betterware' ? 'Betterware' : 'Sheló NABEL'}
+                            </span>
+                            <h4 className="text-sm font-semibold text-slate-900 leading-snug line-clamp-2">
+                              {product.name}
+                            </h4>
+                          </div>
                           <button
                             type="button"
                             onClick={() => onRemoveItem(product.id)}

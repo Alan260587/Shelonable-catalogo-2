@@ -8,7 +8,12 @@ coverage/
 !.env.example
 public/assets/catalog_pages/
 .aistudio/
+.tempmediaStorage/
+data/
+Manual_Uso_Shelo_NABEL_2026.pdf
 public/assets/aistudio/IMG-20261020-WA0027_c04a4874.jpg
 public/assets/aistudio/Screenshot_20261020_144209_01ce81a1.jpg
 public/assets/aistudio/Screenshot_20261020_150851_f3a23d68.jpg
+public/assets/aistudio/Screenshot_20261110_114726_d98d0dfd.jpg
 public/assets/aistudio/Catalogo_Shelo_NABEL2026_SyG_fd41deed.pdf
+public/assets/aistudio/Cat_logo_Noviembre_2026_261026_211026_21b3198a.pdf

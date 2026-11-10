@@ -1,3 +1,16 @@
+export type CatalogBrand = 'shelo' | 'betterware' | 'promociones';
+
+export interface PromotionItem {
+  id: string;
+  clave: string;
+  title: string;
+  subtitle: string;
+  description: string;
+  badgeText: string;
+  price?: number;
+  imageUrl: string;
+}
+
 export interface Category {
   id: string;
   name: string;
@@ -7,6 +20,7 @@ export interface Category {
   textColor?: string;
   imageUrl: string;
   description: string;
+  brand?: CatalogBrand;
 }
 
 export interface Product {
@@ -17,10 +31,12 @@ export interface Product {
   description: string;
   presentation: string;
   price: number;
+  originalPrice?: number;
   categoryId: string;
   catalogPage: string;
   imageUrl: string;
   featured?: boolean;
+  brand?: CatalogBrand;
   priceTagStyle?: 'blue' | 'emerald' | 'rose' | 'amber' | 'purple' | 'dark';
 }
 
@@ -36,6 +52,7 @@ export interface CatalogData {
   distributorName: string;
   distributorLocation: string;
   lastUpdated: string;
+  deletedClaves?: string[];
 }
 
 export interface AdminStatus {

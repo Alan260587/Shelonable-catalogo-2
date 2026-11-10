@@ -1,130 +1,44 @@
-# Guía de Configuración de Supabase — Sheló NABEL 2026
+# Guía de Configuración y Estructuración SQL de Supabase — Sheló NABEL + Betterware + Promociones (2026)
 
-Esta aplicación ya cuenta con toda la integración de **Supabase** lista para usarse (tabla `public.products`, políticas de seguridad RLS y bucket público de imágenes `product-images`).
+Esta aplicación cuenta con una arquitectura SQL completa en **Supabase** que cubre los **3 apartados oficiales** de la tienda:
+1. **🌿 Sheló NABEL 2026**: 13 categorías y 33 productos oficiales (`brand = 'shelo'`).
+2. **🏠 Betterware Noviembre 2026**: 11 categorías y 50 productos oficiales (`brand = 'betterware'`).
+3. **✨ Apartado de Promociones**: 2 promociones de afiliación y membresía con imágenes grandes (`PROMO-01` y `PROMO-02`, `brand = 'promociones'`).
 
-> **Importante:** Mientras **no** configures las dos variables (`VITE_SUPABASE_URL` y `VITE_SUPABASE_ANON_KEY`), **la aplicación sigue funcionando exactamente igual con el catálogo actual y el servidor local**, sin mostrar errores ni dejar el catálogo en blanco.
-
----
-
-## Paso 1: Crear el Proyecto en Supabase
-
-1. Ingresa a [https://supabase.com/dashboard](https://supabase.com/dashboard) e inicia sesión.
-2. Haz clic en **New project**.
-3. Asigna un nombre (por ejemplo, `shelo-nabel-2026`), define una contraseña para la base de datos, selecciona la región más cercana y pulsa **Create new project**.
-4. Espera aproximadamente 1 a 2 minutos a que termine de aprovisionarse el proyecto.
+> **Importante:** Mientras no configures variables o sesión de Supabase, la aplicación funciona al 100% con el respaldo del servidor Express/SSE y almacenamiento atómico en JSON (`data/catalog.json`, `data/betterware_catalog.json` y `data/promotions.json`), sin perder ningún cambio.
 
 ---
 
-## Paso 2: Ejecutar `supabase/schema.sql` en el SQL Editor
+## 1. Estructura SQL Completa (`supabase/schema.sql`)
 
-1. En el menú lateral izquierdo de tu proyecto en Supabase, entra a **SQL Editor** y haz clic en **New query**.
-2. Abre el archivo `supabase/schema.sql` de este proyecto, copia **todo** su contenido y pégalo en el editor SQL de Supabase.
-3. Haz clic en **Run** (o presiona `Ctrl + Enter` / `Cmd + Enter`).
-4. Esto creará automáticamente:
-   - La tabla `public.products` con todos los campos del catálogo (`id`, `key`, `name`, `subtitle`, `description`, `price`, `image_url`, `image_path`, `category`, `page`, `size`, `is_active`, `created_at` y `updated_at`).
-   - El activador automático de `updated_at`.
-   - Row Level Security (**RLS**) activado en `public.products` con:
-     - **Lectura pública (`SELECT`)** para `anon` y `authenticated` (únicamente filas con `is_active = true`).
-     - **Escritura (`INSERT`, `UPDATE`, `DELETE`)** restringida **solo a usuarios `authenticated`**.
-   - El bucket público de Storage llamado **`product-images`** junto con sus políticas en `storage.objects`:
-     - **Lectura pública (`SELECT`)** para `anon` y `authenticated`.
-     - **Subida, actualización y borrado (`INSERT`, `UPDATE`, `DELETE`)** restringidos **solo a usuarios `authenticated`**.
+Al ejecutar `supabase/schema.sql` en el **SQL Editor** de Supabase se crean de forma idempotente:
 
-### Nota importante sobre políticas de escritura (`authenticated`) y respaldo actual
-
-- El Panel Administrativo mantiene intacto su acceso de sesión única con su llave actual enmascarada (`****`).
-- Debido a que las políticas RLS de `public.products` y `storage.objects` exigen el rol `authenticated` para cualquier escritura, **mientras el administrador no inicie sesión con Supabase Auth dentro del panel, las escrituras directas con el rol `anon` quedan bloqueadas por RLS**.
-- Por ello, `src/lib/supabaseCatalog.ts` comprueba previamente si existe una sesión autenticada activa (`supabase.auth.getSession()`) antes de ejecutar `upsertProductToSupabase`, `deleteProductFromSupabase` o `uploadProductImageToSupabase`.
-- **Sin sesión autenticada de Supabase:** devuelve un fallo controlado y `src/App.tsx` mantiene el guardado por el **servidor Express/SSE actual** con un aviso no bloqueante, sin perder ninguna edición.
-- **Con sesión autenticada de Supabase:** todas las operaciones de crear, editar y eliminar productos, así como la subida de imágenes nuevas, van directamente a Supabase (`public.products` y bucket `product-images`).
-
----
-
-## Paso 3: Cargar los 33 Productos Iniciales con `supabase/seed_products.sql`
-
-1. En el **SQL Editor** de Supabase, abre una nueva consulta (**New query**).
-2. Copia **todo** el contenido del archivo `supabase/seed_products.sql` y pégalo en el editor.
-3. Haz clic en **Run**.
-4. Se insertarán los **33 productos oficiales** del catálogo Sheló NABEL 2026 conservando su clave (`key`), nombre, categoría, precio, descripción, presentación, página e imagen actual.
-   - *Nota:* El script se ejecuta desde el SQL Editor de Supabase (con privilegios de propietario) y utiliza `ON CONFLICT (key) DO NOTHING`, por lo que no sobrescribe productos ni precios existentes.
+- **Tabla `public.categories` (25 categorías)**:
+  - Almacena las 13 categorías de Sheló NABEL, las 11 categorías de Betterware Noviembre 2026 y la categoría `promociones-shelo`.
+- **Tabla `public.products` (85 registros totales)**:
+  - Columnas: `id`, `key` (única), `name`, `subtitle`, `description`, `price`, `original_price`, `image_url`, `image_path`, `category`, `page`, `size`, `brand` (`'shelo' | 'betterware' | 'promociones'`), `featured`, `price_tag_style`, `is_active`, `created_at`, `updated_at`.
+  - Incluye migración automática `ALTER TABLE public.products ADD COLUMN IF NOT EXISTS ...` para instalaciones previas.
+- **Tabla `public.promotions` (2 promociones principales)**:
+  - Almacena las promociones grandes (`promo-01` / `PROMO-01` y `promo-02` / `PROMO-02`) con título, subtítulo, etiqueta destacada, inversión (`price`), descripción e imagen grande.
+- **Vistas SQL por Apartado**:
+  - `public.v_shelo_products`
+  - `public.v_betterware_products`
+  - `public.v_promotions_catalog`
+- **Seguridad RLS (Row Level Security)**:
+  - **Lectura (`SELECT`)**: Pública para `anon` y `authenticated` (`is_active = true`).
+  - **Escritura (`INSERT`, `UPDATE`, `DELETE`)**: Reservada exclusivamente para usuarios autenticados (`authenticated`).
+- **Storage Bucket Público `product-images`**:
+  - Aloja las imágenes subidas de productos/promociones y los 2 catálogos PDF completos (`catalog/Catalogo_Shelo_NABEL2026.pdf` y `catalog/Catalogo_Betterware_Noviembre2026.pdf`).
+- **Supabase Realtime (`supabase_realtime`)**:
+  - Publicación activa sobre `public.products`, `public.categories` y `public.promotions`.
 
 ---
 
-## Paso 4: Verificar el Bucket `product-images`
+## 2. Semilla SQL de Todos los Apartados (`supabase/seed_products.sql`)
 
-1. En el menú lateral izquierdo de Supabase, entra a **Storage**.
-2. Verifica que aparezca el bucket llamado **`product-images`** con la etiqueta **Public**.
-   - La lectura de imágenes es pública para cualquier visitante (`anon` y `authenticated`).
-   - La subida, actualización y borrado en `product-images` está reservada a `authenticated`.
+El archivo `supabase/seed_products.sql` inserta con `ON CONFLICT DO NOTHING` (sin sobrescribir precios ni imágenes que ya hayas editado):
+- **25 categorías** en `public.categories`.
+- **85 registros** en `public.products` (33 de Sheló NABEL + 50 de Betterware Noviembre 2026 + 2 Promociones).
+- **2 promociones oficiales** en `public.promotions`.
 
----
-
-## Paso 5: Copiar las Credenciales Públicas desde Supabase
-
-1. En el menú lateral de Supabase, ve a **Project Settings** (ícono de engrane) > **API**.
-2. Copia los siguientes **dos valores**:
-   - **Project URL**
-   - **Project API keys > `anon` `public`**
-   - ⚠️ **Nunca uses la clave `service_role` en el frontend**; usa únicamente la clave `anon` `public`.
-
----
-
-## Paso 6: Configurar las Variables en AI Studio (Secrets)
-
-1. En AI Studio, abre **Settings > Secrets** (o el panel de variables de entorno).
-2. Añade estas dos variables:
-   - **`VITE_SUPABASE_URL`** = *(tu Project URL de Supabase)*
-   - **`VITE_SUPABASE_ANON_KEY`** = *(tu clave `anon` `public` de Supabase)*
-3. Al recargar la aplicación, la lectura pública de los 33 productos desde Supabase queda activa y dentro del **Panel Administrativo** el indicador muestra:
-   - **`Supabase: conectado`**
-4. Si esas variables están vacías, el indicador muestra:
-   - **`Supabase: no configurado — funciona con el catálogo actual`**
-
----
-
-## Paso 7: Activar el Guardado Automático desde la Página (Supabase Auth)
-
-Para que los productos e imágenes agregados, editados o eliminados desde el Panel Administrativo se guarden **automáticamente en Supabase** (sin ejecutar SQL nuevo ni modificar las políticas ya creadas):
-
-1. **Crear el usuario administrador en Supabase:**
-   - Entra al dashboard de tu proyecto en Supabase.
-   - En el menú lateral izquierdo, ve a **Authentication → Users**.
-   - Haz clic en el botón **Add user** → **Create new user**.
-   - Escribe el **correo electrónico** y la **contraseña** que usarás como administrador, deja activada la casilla **Auto Confirm User** y pulsa **Create user**.
-
-2. **Iniciar sesión dentro del Panel Administrativo de la app:**
-   - En la página web, abre el **Panel Admin** e ingresa primero con tu **llave actual del panel** (`****`).
-   - Una vez dentro del panel, verás la sección **«Sesión de Supabase (para guardar en la base de datos)»**, que mostrará inicialmente **`Sesión de Supabase no iniciada`**.
-   - Escribe el **correo** y la **contraseña** del usuario que creaste en Supabase y pulsa **«Iniciar sesión en Supabase»**.
-   - El estado cambiará a **`Sesión de Supabase iniciada: <tu-correo>`** y la sesión se mantendrá activa aunque recargues la página mientras Supabase la conserve vigente.
-
-3. **Qué sucede a partir de ese momento (CON sesión iniciada):**
-   - **Crear o editar productos:** Se guardan automáticamente en la tabla `public.products` mediante `upsertProductToSupabase`.
-   - **Subir imágenes desde tu computadora:** Se suben primero al bucket público `product-images` (bajo `products/<clave>-<timestamp>.<ext>`) y su URL pública y ruta se guardan automáticamente en `image_url` e `image_path` de `public.products`.
-   - **Eliminar productos:** Se eliminan directamente de `public.products` mediante `deleteProductFromSupabase`.
-   - Si ocurriera algún error en Supabase con la sesión activa, el panel mostrará un mensaje de error claro sin fingir que se guardó en la base de datos.
-
-4. **Cómo cerrar la sesión de Supabase y comportamiento SIN sesión:**
-   - Para cerrar únicamente la sesión de la base de datos, haz clic en el botón **«Cerrar sesión de Supabase»** dentro de esa misma sección; **esto no cierra el Panel Admin ni cambia su llave actual**.
-   - Mientras la sesión de Supabase esté cerrada (`Sesión de Supabase no iniciada`), crear, editar, eliminar y subir imágenes seguirá funcionando mediante el **respaldo del servidor Express/SSE actual** con su aviso no bloqueante, sin perder tus cambios locales.
-
----
-
-## Paso 8: Alojar el PDF Completo del Catálogo en Supabase Storage (Sin subirlo a GitHub)
-
-El archivo PDF local del catálogo está excluido en `.gitignore` para mantener el repositorio de GitHub ligero (~4 MB). Para que la descarga del PDF funcione también en despliegues externos o copias desde GitHub:
-
-1. **Subir el PDF desde el Panel Administrativo (una sola vez):**
-   - Entra al **Panel Administrativo** con tu llave actual y luego inicia sesión en la sección **«Sesión de Supabase (para guardar en la base de datos)»**.
-   - Al tener la sesión activa, aparecerá el botón **«Subir PDF del catálogo a Supabase Storage»**.
-   - Al pulsarlo, la aplicación obtiene el archivo PDF desde `/api/catalog/pdf` como `Blob`, verifica que no esté vacío y lo sube con tu sesión autenticada al bucket público **`product-images`** en la ruta fija **`catalog/Catalogo_Shelo_NABEL2026.pdf`** (`upsert: true`, `contentType: 'application/pdf'`).
-   - Al finalizar, el panel muestra la ruta guardada y la URL pública del PDF en Supabase Storage.
-
-2. **Cómo funciona la descarga en `/api/catalog/pdf`:**
-   - Cuando un visitante pulsa descargar el catálogo PDF (`/api/catalog/pdf`), el servidor realiza primero una comprobación `HEAD` (sin autenticación y con tiempo de espera corto) a la URL pública `.../storage/v1/object/public/product-images/catalog/Catalogo_Shelo_NABEL2026.pdf`.
-   - **Si el archivo ya existe en Supabase Storage (`HTTP 200`):** el servidor responde con una redirección **`302 Found`** hacia esa URL pública de Supabase Storage.
-   - **Si aún no se ha subido o la comprobación falla/expira:** el servidor entrega como respaldo el archivo PDF local (si existe en el entorno actual) o responde `404` con un mensaje claro si tampoco existe localmente.
-   - El visor interactivo de páginas sigue utilizando sin cambios las imágenes prerenderizadas `page_001.jpg`–`page_030.jpg`.
-
-
-
+> **Tip rápido desde el Panel Administrativo (`****`)**: También puedes descargar el archivo SQL unificado (`schema.sql` + `seed_products.sql`) directamente desde el botón **«Descargar SQL Completo»** dentro del Panel Administrativo, o pulsar **«Sincronizar Todo (85)»** una vez iniciada tu sesión de Supabase Auth.
